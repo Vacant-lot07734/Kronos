@@ -29,6 +29,7 @@ class KronosTokenizer(nn.Module, PyTorchModelHubMixin):
            resid_dropout_p (float): Dropout probability for residual connections.
            s1_bits (int): Number of bits for the pre token in BSQuantizer.
            s2_bits (int): Number of bits for the post token in BSQuantizer.
+           TODO: 学习bsq 参数
            beta (float): Beta parameter for BSQuantizer.
            gamma0 (float): Gamma0 parameter for BSQuantizer.
            gamma (float): Gamma parameter for BSQuantizer.
