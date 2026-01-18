@@ -35,6 +35,10 @@ def plot_prediction(kline_df, pred_df):
     ax2.grid(True)
 
     plt.tight_layout()
+    # save figure to workspace figures/ directory
+    import os
+    os.makedirs('figures', exist_ok=True)
+    plt.savefig('figures/prediction.png', dpi=300, bbox_inches='tight')
     plt.show()
 
 
