@@ -81,24 +81,24 @@ class BinarySphericalQuantizer(nn.Module):
 
     def quantize(self, z):
         assert z.shape[-1] == self.embed_dim, f"Expected {self.embed_dim} dimensions, got {z.shape[-1]}"
-
+        # 二值化
         zhat = torch.where(z > 0,
                            torch.tensor(1, dtype=z.dtype, device=z.device),
                            torch.tensor(-1, dtype=z.dtype, device=z.device))
-        return z + (zhat - z).detach()
+        return z + (zhat - z).detach() # todo STE
 
     def forward(self, z, collect_metrics=True):
         # if self.input_format == 'bchw':
         #     z = rearrange(z, 'b c h w -> b h w c')
         zq = self.quantize(z)
-
+        # todo 量化后的值从 ±1 变为 ±1/√20，或不操作, 这里的缩放和L2归一化有区别吗？
         q_scale = 1. / (self.embed_dim ** 0.5) if self.l2_norm else 1.
 
         zq = zq * q_scale
 
         if not collect_metrics:
             return zq, zq.new_zeros(()), {}
-
+        # todo 后面是训练编码器时才会用到吗？
         indices = self.codes_to_indexes(zq.detach())
         group_indices = self.codes_to_group_indexes(zq.detach())
         if not self.training:
@@ -232,18 +232,18 @@ class BSQuantizer(nn.Module):
         self.bsq = BinarySphericalQuantizer(self.codebook_dim, beta, gamma0, gamma, zeta, group_size=group_size)
 
     def bits_to_indices(self, bits):
-        bits = (bits >= 0).to(torch.long)
+        bits = (bits >= 0).to(torch.long) # # ±1/√20 → 0/1
         indices = 2 ** torch.arange(
             0,
             bits.shape[-1],
             1,
             dtype=torch.long,
             device=bits.device,
-        )
-        return (bits * indices).sum(-1)
+        ) # 对两个张量按元素相乘后，沿着最后一个维度求和
+        return (bits * indices).sum(-1) # Least Significant Bit first, 二进制转十进制
 
     def forward(self, z, half=False, collect_metrics=True):
-        z = F.normalize(z, dim=-1)
+        z = F.normalize(z, dim=-1) # L2 norm, 欧几里得范数为1
         quantized, bsq_loss, metrics = self.bsq(z, collect_metrics=collect_metrics)
         if half:
             q_pre = quantized[:, :, :self.s1_bits]

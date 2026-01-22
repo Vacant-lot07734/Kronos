@@ -297,14 +297,14 @@ class Kronos(nn.Module, PyTorchModelHubMixin):
         x = self.embedding([s1_ids, s2_ids])
         if stamp is not None:
             time_embedding = self.time_emb(stamp)
-            x = x + time_embedding
+            x = x + time_embedding # 诸元素相加
         x = self.token_drop(x)
 
         for layer in self.transformer:
             x = layer(x, key_padding_mask=padding_mask)
 
         x = self.norm(x)
-
+        # todo 这里只是投影512到1024吗
         s1_logits = self.head(x)
         return s1_logits, x
 
@@ -386,26 +386,26 @@ def sample_from_logits(logits, temperature=1.0, top_k=None, top_p=None, sample_l
 
     return x
 
-
+# todo clip 为什么默认值是 5
 def auto_regressive_inference(tokenizer, model, x, x_stamp, y_stamp, max_context, pred_len, clip=5, T=1.0, top_k=0, top_p=0.99, sample_count=5, verbose=False):
     with torch.no_grad():
         x = torch.clip(x, -clip, clip)
 
         device = x.device
-        x = x.unsqueeze(1).repeat(1, sample_count, 1, 1).reshape(-1, x.size(1), x.size(2)).to(device)
+        x = x.unsqueeze(1).repeat(1, sample_count, 1, 1).reshape(-1, x.size(1), x.size(2)).to(device) # 把 x 变成 (B, 1, T, C)；repeat 复制 S 份成 (B, S, T, C)；reshape(-1, T, C) 合并 batch 得 (B*S, T, C)；to(device) 保证设备一致。
         x_stamp = x_stamp.unsqueeze(1).repeat(1, sample_count, 1, 1).reshape(-1, x_stamp.size(1), x_stamp.size(2)).to(device)
         y_stamp = y_stamp.unsqueeze(1).repeat(1, sample_count, 1, 1).reshape(-1, y_stamp.size(1), y_stamp.size(2)).to(device)
-
-        x_token = tokenizer.encode(x, half=True)
+        # todo 其实bsq球面量化就是，输入向量先 L2 归一化，然后二值化，缩放（量化后的值从 ±1 变为 ±1/√20，或不操作）再二进制转十进制，再
+        x_token = tokenizer.encode(x, half=True) # 编码器的操作其实是 6维向量，transformer块堆叠输出256维，再投影20维，再bsq球面量化，分为10维coarse和10维fine，再indice to tokenid
         
         initial_seq_len = x.size(1)
         batch_size = x_token[0].size(0)
         total_seq_len = initial_seq_len + pred_len
         full_stamp = torch.cat([x_stamp, y_stamp], dim=1)
-
+        # 预分配存储预测 token 的张量
         generated_pre = x_token[0].new_empty(batch_size, pred_len)
         generated_post = x_token[1].new_empty(batch_size, pred_len)
-
+        # 创建固定大小的缓冲区，用于滑动窗口推理，缓冲区大小为 512/2048
         pre_buffer = x_token[0].new_zeros(batch_size, max_context)
         post_buffer = x_token[1].new_zeros(batch_size, max_context)
         buffer_len = min(initial_seq_len, max_context)
@@ -435,7 +435,8 @@ def auto_regressive_inference(tokenizer, model, x, x_stamp, y_stamp, max_context
             current_stamp = full_stamp[:, context_start:context_end, :].contiguous()
 
             s1_logits, context = model.decode_s1(input_tokens[0], input_tokens[1], current_stamp)
-            s1_logits = s1_logits[:, -1, :]
+            s1_logits = s1_logits[:, -1, :] # 只取序列最后一个位置
+            # todo 温度缩放
             sample_pre = sample_from_logits(s1_logits, temperature=T, top_k=top_k, top_p=top_p, sample_logits=True)
 
             s2_logits = model.decode_s2(context, sample_pre)
@@ -545,14 +546,15 @@ class KronosPredictor:
         x_mean, x_std = np.mean(x, axis=0), np.std(x, axis=0)
 
         x = (x - x_mean) / (x_std + 1e-5)
+        # 裁剪异常值
         x = np.clip(x, -self.clip, self.clip)
-
+        # 增加batch维度 (L, 6) -> (1, L, 6)
         x = x[np.newaxis, :]
         x_stamp = x_stamp[np.newaxis, :]
         y_stamp = y_stamp[np.newaxis, :]
 
         preds = self.generate(x, x_stamp, y_stamp, pred_len, T, top_k, top_p, sample_count, verbose)
-
+        # 去掉btach维度
         preds = preds.squeeze(0)
         preds = preds * (x_std + 1e-5) + x_mean
 
