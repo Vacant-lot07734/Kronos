@@ -304,10 +304,10 @@ class Kronos(nn.Module, PyTorchModelHubMixin):
             x = layer(x, key_padding_mask=padding_mask)
 
         x = self.norm(x)
-        # todo 这里只是投影512到1024吗
+        # todo 这里只是投影512到1024吗, 因为 s1_ids 的 vocab_size 是 1024， 也就是说所有llm的后面都会有一层都是投影到词表大小？
         s1_logits = self.head(x)
         return s1_logits, x
-
+    # todo 何意味
     def decode_s2(self, context, s1_ids, padding_mask=None):
         """
         Decodes the s2 tokens, conditioned on the context and s1 tokens.
@@ -433,7 +433,7 @@ def auto_regressive_inference(tokenizer, model, x, x_stamp, y_stamp, max_context
             context_end = current_seq_len
             context_start = max(0, context_end - max_context)
             current_stamp = full_stamp[:, context_start:context_end, :].contiguous()
-
+            # (1, 400, 1024) (1, 400, 512)
             s1_logits, context = model.decode_s1(input_tokens[0], input_tokens[1], current_stamp)
             s1_logits = s1_logits[:, -1, :] # 只取序列最后一个位置
             # todo 温度缩放

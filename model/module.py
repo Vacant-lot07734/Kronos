@@ -98,7 +98,7 @@ class BinarySphericalQuantizer(nn.Module):
 
         if not collect_metrics:
             return zq, zq.new_zeros(()), {}
-        # todo 后面是训练编码器时才会用到吗？
+        # todo 后面是训练编码器时才会用到吗？也就是说上面推理过程中，其实是先±1 变为 ±1/√20，然后二进制向量 to tokenid时，又±1/√20 变为 ±1，会让初学者困惑
         indices = self.codes_to_indexes(zq.detach())
         group_indices = self.codes_to_group_indexes(zq.detach())
         if not self.training:
@@ -405,7 +405,7 @@ class HierarchicalEmbedding(nn.Module):
 
         vocab_s1 = 2 ** s1_bits
         vocab_s2 = 2 ** s2_bits
-
+        # todo 进一步学习 nn.Embedding 的用法
         self.emb_s1 = nn.Embedding(vocab_s1, d_model)
         self.emb_s2 = nn.Embedding(vocab_s2, d_model)
         self.d_model = d_model

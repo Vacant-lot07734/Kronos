@@ -1,164 +1,222 @@
-# Kronos 预测模型 (L180-L331) 深度解析
+# Kronos 预测模型深度解析
 
-本文档基于 `model/kronos.py` (L180-L331) 代码，对 `Kronos` 类（时序预测主模型）的工作流、核心架构、数据形状变换及关键数学公式进行深度解析。
+本文档深度剖析 `model/kronos.py` 中 `Kronos` 类（时序预测主模型）的工作原理。该模型采用 **双头依赖解码 (Dual-Head Dependency Decoding)** 机制，是一种专门针对分层 Token 序列设计的自回归 Transformer。
 
-## 一、模型概述
+## 一、核心架构概览
 
-`Kronos` 是一个用于处理量化后 Token 序列的自回归预测模型。它接收由 `KronosTokenizer` 生成的 $S_1$ (Coarse) 和 $S_2$ (Fine) 两组 Token 序列，结合时间戳信息，通过 Transformer 架构预测未来的 Token。
+`Kronos` 不直接预测股价数值，而是预测下一时刻的 Token ID。由于 Tokenizer 将数据编码为 $S_1$ (Coarse/高位) 和 $S_2$ (Fine/低位) 两组 Token，Predictor 也相应采用了两阶段预测架构。
 
-核心特点是采用了 **双头依赖解码 (Dual-Head Dependency Decoding)** 机制：
-1.  首先基于历史上下文预测粗粒度的 $S_1$ Token。
-2.  然后利用 **Dependency Aware Layer**，将生成的 $S_1$ Embedding 作为条件，预测对应的细粒度 $S_2$ Token。
+### 关键组件
+
+1.  **Hierarchical Embedding (分层嵌入)**: 将 $S_1$ 和 $S_2$ Token 映射到同一向量空间并融合。
+2.  **Temporal Embedding (时间嵌入)**: 注入时间特征（分钟、小时、星期等）。
+3.  **Transformer Backbone**: 标准 Transformer Encoder，提取时序上下文特征。
+4.  **Dual Head System (双头系统)**:
+    *   **Head 1**: 基于上下文直接预测 $S_1$。
+    *   **Dependency Layer**: 引入Cross-Attention，将 $S_1$ 作为条件融合到上下文中。
+    *   **Head 2**: 基于增强后的上下文预测 $S_2$。
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         训练阶段                                 │
+│                                                                  │
+│  K线数据 → Tokenizer.encode → [s1, s2] tokens (完整序列)        │
+│                    ↓                                             │
+│         Kronos.forward(s1[:-1], s2[:-1])                        │
+│                    ↓                                             │
+│         s1_logits, s2_logits (并行输出)                          │
+│                    ↓                                             │
+│         CrossEntropy(logits, targets[1:])                        │
+│                    ↓                                             │
+│         loss.backward() → 更新权重                               │
+│                                                                  │
+│  特点: 并行、Teacher Forcing、Dropout 启用                       │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                         推理阶段                                 │
+│                                                                  │
+│  K线数据 → Tokenizer.encode → [s1, s2] tokens (历史)            │
+│                    ↓                                             │
+│  ┌─────────── 循环 pred_len 次 ────────────┐                    │
+│  │                                          │                    │
+│  │  Kronos.decode_s1(buffer) → s1_logits   │                    │
+│  │           ↓ 采样                         │                    │
+│  │       s1_token                           │                    │
+│  │           ↓                              │                    │
+│  │  Kronos.decode_s2(context, s1_token)    │                    │
+│  │           ↓ 采样                         │                    │
+│  │       s2_token                           │                    │
+│  │           ↓                              │                    │
+│  │    更新滑动窗口 buffer                   │                    │
+│  │                                          │                    │
+│  └──────────────────────────────────────────┘                    │
+│                    ↓                                             │
+│  Tokenizer.decode([all_s1, all_s2]) → 预测的 K 线                │
+│                                                                  │
+│  特点: 串行、自回归采样、Dropout 禁用                            │
+└─────────────────────────────────────────────────────────────────┘
+```
+---
+
+## 二、前向传播工作流与数学原理 (Training Phase)
+
+在训练阶段，模型接收完整的历史序列，并行计算所有时刻的预测结果。
+
+### 1. 符号与维度定义
+
+*   $B$: Batch size
+*   $T$: Sequence length (输入序列长度)
+*   $D$: Model dimension (`d_model`，例如 256)
+*   $V_1, V_2$: $S_1$ 和 $S_2$ 的词表大小 (例如 $2^{10}=1024$)
+
+### 2. 层次化嵌入与融合 (Hierarchical Embedding)
+
+模型首先将两组 Token 转换为向量并融合。
+
+*   **输入**: $I^{(s1)}, I^{(s2)} \in \mathbb{R}^{B \times T}$ (Token IDs)
+*   **计算**:
+    $$E^{(s1)} = \text{Embedding}_{s1}(I^{(s1)}) \cdot \sqrt{D} \quad \in \mathbb{R}^{B \times T \times D}$$
+    $$E^{(s2)} = \text{Embedding}_{s2}(I^{(s2)}) \cdot \sqrt{D} \quad \in \mathbb{R}^{B \times T \times D}$$
+    $$X_{cat} = \text{Concat}(E^{(s1)}, E^{(s2)}) \quad \in \mathbb{R}^{B \times T \times 2D}$$
+    $$X_{emb} = X_{cat} W_{fusion} + b_{fusion} \quad \in \mathbb{R}^{B \times T \times D}$$
+    *其中 $W_{fusion} \in \mathbb{R}^{2D \times D}$*
+
+### 3. 时间特征注入 (Temporal Embedding)
+
+*   **输入**: $Stamp \in \mathbb{R}^{B \times T \times 5}$ (5个时间特征)
+*   **计算**:
+    $$E_{time} = \sum_{k=1}^{5} \text{Embedding}_{k}(Stamp_{:,:,k})$$
+    $$X_{in} = X_{emb} + E_{time} \quad \in \mathbb{R}^{B \times T \times D}$$
+
+### 4. Transformer 主干 (Context Encoding)
+
+提取时序上下文特征。
+
+*   **计算**:
+    $$H_{ctx} = \text{TransformerEncoder}(X_{in}) \quad \in \mathbb{R}^{B \times T \times D}$$
+    $$H_{ctx} = \text{RMSNorm}(H_{ctx})$$
+
+### 5. 第一级预测 (Head 1: Predict S1)
+
+直接利用上下文预测粗粒度 Token。
+
+*   **计算**:
+    $$Logits^{(s1)} = H_{ctx} W_{head1} + b_{head1} \quad \in \mathbb{R}^{B \times T \times V_1}$$
+    *其中 $W_{head1} \in \mathbb{R}^{D \times V_1}$*
+
+### 6. 依赖感知层 (Dependency Aware Layer)
+
+这是模型的核心，用于融合 $S_1$ 信息以辅助 $S_2$ 预测。
+
+*   **条件输入**: 在训练时使用 Teacher Forcing（真实的 $S_1$），推理时使用采样得到的 $\hat{S_1}$。
+    $$E_{cond} = \text{Embedding}_{s1}(I^{(s1)}_{target}) \quad \in \mathbb{R}^{B \times T \times D}$$
+    *(注意：这里实际上是 sibling_embed，即对应的 S1 embedding)*
+
+*   **Cross-Attention**:
+    *   **Query ($Q$)**: 来自条件 $S_1$ 信息 ($E_{cond}$)
+    *   **Key ($K$), Value ($V$)**: 来自上下文 ($H_{ctx}$)
+    *   **目的**: 用 $S_1$ 的特征去查询上下文中相关的信息。
+    
+    $$Q = E_{cond} W_Q, \quad K = H_{ctx} W_K, \quad V = H_{ctx} W_V$$
+    $$Attn = \text{Softmax}\left(\frac{Q K^T}{\sqrt{D/N_{head}}}\right) V$$
+    $$H_{dep} = \text{RMSNorm}(H_{ctx} + Attn W_O) \quad \in \mathbb{R}^{B \times T \times D}$$
+    
+    *(代码实现细节：`DependencyAwareLayer` 接收 `(hidden_states, sibling_embed)`。在 CrossAttention 中，`query=sibling_embed`，`key=value=hidden_states`)*
+
+### 7. 第二级预测 (Head 2: Predict S2)
+
+基于融合了上下文和 S1 信息的特征预测 $S_2$。
+
+*   **计算**:
+    $$Logits^{(s2)} = H_{dep} W_{head2} + b_{head2} \quad \in \mathbb{R}^{B \times T \times V_2}$$
 
 ---
 
-## 二、符号与维度约定
+## 三、推理阶段：自回归循环 (Inference Phase)
 
-### 1. 核心超参数
+推理阶段与训练阶段最大的不同在于**串行生成**。每一步的输入依赖于上一步的输出。
 
-*   **B**: Batch size
-*   **T**: Sequence length (Input history length)
-*   **$D_{model}$** (`d_model`): 模型隐藏层维度。
-*   **L**: Transformer Layers (`n_layers`)。
-*   **H**: Attention Heads (`n_heads`)。
-*   **$S_1, S_2$**: Token 的量化比特数。
-*   **$V_1, V_2$**: 词表大小，其中 $V_1 = 2^{S_1}, V_2 = 2^{S_2}$。
+### 数据流与形状变化 (Data Flow)
 
-### 2. 输入张量
+假设 Batch Size = $B$, Sample Count = $S$, Context Window = $W$。为了并行采样，通常将 Batch 扩展为 $B \times S$。
 
-*   **$Ids_{s1}, Ids_{s2} \in \mathbb{R}^{B \times T}$**: 输入的 Token ID 序列。
-*   **$Stamp \in \mathbb{R}^{B \times T \times 5}$**: 时间戳特征（分钟、小时、星期、日、月）。
-
----
-
-## 三、前向传播工作流详解 (Forward & Inference)
-
-`Kronos` 的工作流可以分为 **Context Encoding** 和 **Dual-Stage Decoding** 两个主要阶段。
-
-### 阶段 1: 层次化嵌入与上下文编码 (Context Encoding)
-
-1.  **分层嵌入融合 (Hierarchical Embedding)**:
-    *   代码: `self.embedding`
-    *   将双路 Token $S_1, S_2$ 映射为向量并融合。
-    *   $$E_{s1} = \text{Embed}_{s1}(Ids_{s1}) \cdot \sqrt{D_{model}}$$
-    *   $$E_{s2} = \text{Embed}_{s2}(Ids_{s2}) \cdot \sqrt{D_{model}}$$
-    *   $$X_{emb} = \text{Linear}_{fusion}([E_{s1}; E_{s2}])$$
-    *   **形状**: $(B, T, D_{model}) \leftarrow \text{cat}((B, T, D_{model}), (B, T, D_{model}))$
-
-2.  **时间嵌入叠加 (Temporal Embedding)**:
-    *   代码: `self.time_emb(stamp)`
-    *   $$X_{in} = X_{emb} + \sum_{feat} \text{Embed}_{time}(Stamp_{feat})$$
-    *   **形状**: $(B, T, D_{model})$ 保持不变。
-
-3.  **Transformer 主干提取**:
-    *   代码: `self.transformer`
-    *   $$H_{ctx} = \text{TransformerStack}(X_{in})$$
-    *   **形状**: $(B, T, D_{model})$
-
-4.  **归一化**:
-    *   代码: `self.norm`
-    *   $$H_{ctx} = \text{RMSNorm}(H_{ctx})$$
-
-### 阶段 2: 第一级预测 (Predict S1)
-
-直接利用 Transformer 的输出 $H_{ctx}$ 预测粗粒度 Token $S_1$。
-
-1.  **S1 Logits 计算**:
-    *   代码: `self.head(x)`
-    *   $$Logits_{s1} = H_{ctx} W_{head\_s1}$$
-    *   **形状**: $(B, T, D_{model}) \rightarrow (B, T, V_1)$
-
-2.  **S1 采样 (Inference 时)**:
-    *   $$P(s1) = \text{Softmax}(Logits_{s1})$$
-    *   $$\hat{s1} \sim \text{Multinomial}(P(s1))$$ or $$\text{Argmax}$$
-
-### 阶段 3: 第二级依赖预测 (Predict S2 Conditioned on S1)
-
-利用 **Dependency Aware Layer**，使得 $S_2$ 的预测依赖于 **当前步已知的 S1 信息**。
-
-1.  **S1 条件嵌入**:
-    *   代码: `self.embedding.emb_s1(s1_targets 或 \hat{s1})`
-    *   $$E_{cond} = \text{Embed}_{s1}(\hat{s1})$$
-    *   **形状**: $(B, T, D_{model})$
-
-2.  **依赖感知层融合 (Dependency Aware Layer)**:
-    *   代码: `self.dep_layer(x, sibling_embed)`
-    *   这是一个 Cross-Attention 变体，Query 为 $E_{cond}$ (sibling)，Key/Value 为 $H_{ctx}$ (context)。
-    *   **注意**: 代码实现中 `self.dep_layer` 的 `forward` 参数是 `(hidden_states, sibling_embed)`。
-    *   仔细查阅 `module.py` 的 `DependencyAwareLayer`:
-        ```python
-        def forward(self, hidden_states, sibling_embed ...):
-            attn_out = self.cross_attn(query=sibling_embed, key=hidden_states, value=hidden_states ...)
-            return self.norm(hidden_states + attn_out)
-        ```
-    *   **修正理解**: 这里 Query 是 `sibling_embed` ($S_1信息$)，Key/Value 是 `hidden_states` ($H_{ctx}$)。这意味着实际上是用 $S_1$ 的 Embedding 去 "查询" 上下文信息，来增强 $S_2$ 的预测。
-    *   $$H_{s2} = \text{RMSNorm}(H_{ctx} + \text{CrossAttn}(Q=E_{cond}, K=H_{ctx}, V=H_{ctx}))$$
-    *   **形状**: $(B, T, D_{model})$
-
-3.  **S2 Logits 计算**:
-    *   代码: `self.head.cond_forward(x2)`
-    *   $$Logits_{s2} = H_{s2} W_{head\_s2}$$
-    *   **形状**: $(B, T, D_{model}) \rightarrow (B, T, V_2)$
-
----
-
-## 四、数据形状变化全览表
-
-假设 Batch Size = $B$, Sequence Length = $T$。
-
-| 步骤 | 变量名 | 张量形状 (Shape) | 说明 |
+| 步骤 | 变量 | 形状 | 说明 |
 | :--- | :--- | :--- | :--- |
-| **Input** | `s1_ids`, `s2_ids` | $(B, T)$ | 输入 Token 序列 |
-| Embedding | `x` | $(B, T, D_{model})$ | Hierarchical Fusion 之后 |
-| Time Emb | `x` | $(B, T, D_{model})$ | 加上时间特征后 |
-| **Transformer** | `x` | $(B, T, D_{model})$ | 经过 $L$ 层 Transformer Block |
-| RMSNorm | `x` | $(B, T, D_{model})$ | 归一化后的上下文 $H_{ctx}$ |
-| **Head S1** | `s1_logits` | $(B, T, V_1)$ | S1 预测分布 |
-| S1 Embed | `sibling_embed` | $(B, T, D_{model})$ | 采样的 S1 再次 Embedding |
-| **Dep Layer** | `x2` | $(B, T, D_{model})$ | Cross-Attn 融合 S1信息与上下文 |
-| **Head S2** | `s2_logits` | $(B, T, V_2)$ | S2 预测分布 |
+| **0. Buffer** | `input_tokens` | $(B \cdot S, W)$ | 当前滑动窗口内的历史 Token |
+| **1. Enocder** | `context` | $(B \cdot S, W, D)$ | Transformer 输出的上下文 |
+| **2. Head 1** | `s1_logits` | $(B \cdot S, W, V_1)$ | 每一时刻的预测分布 |
+| **3. Slice** | `s1_logits` | $(B \cdot S, V_1)$ | **只取最后一个时间步 ($t=-1$)** |
+| **4. Sample** | `sample_pre` | $(B \cdot S, 1)$ | 采样得到当前的 $\hat{s1}$ |
+| **5. Embed** | `sibling_embed` | $(B \cdot S, 1, D)$ | 将 $\hat{s1}$ 重新映射为向量 |
+| **6. Dep Layer** | `context` | $(B \cdot S, W, D)$ | *注意：这里通常应该只需计算最后一步，但代码可能传入了完整 buffer* |
+| **7. CrossAttn** | `x2` | $(B \cdot S, W, D)$ | Key/Val来自上下文, Query来自 S1 |
+| **8. Head 2** | `s2_logits` | $(B \cdot S, W, V_2)$ | S2 预测分布 |
+| **9. Sample** | `sample_post` | $(B \cdot S, 1)$ | 采样得到当前的 $\hat{s2}$ |
+| **10. Update** | `buffer` | $(B \cdot S, W)$ | 将 $\hat{s1}, \hat{s2}$ 滚入 Buffer |
+
+### 自回归循环伪代码
+
+```python
+# 初始化 buffer
+buffer_s1, buffer_s2 = load_history()
+
+for i in range(pred_len):
+    # 1. 编码上下文
+    # context: [batch, window, d_model]
+    s1_logits_seq, context = model.decode_s1(buffer_s1, buffer_s2)
+    
+    # 2. 预测 S1 (只取最后一步)
+    next_s1_logits = s1_logits_seq[:, -1, :] 
+    next_s1 = sample(next_s1_logits)  # [batch, 1]
+    
+    # 3. 预测 S2 (依赖 S1)
+    # 利用刚刚采样得到的 next_s1 作为条件
+    s2_logits_seq = model.decode_s2(context, next_s1)
+    
+    # 4. 预测 S2 (只取最后一步)
+    next_s2_logits = s2_logits_seq[:, -1, :]
+    next_s2 = sample(next_s2_logits) # [batch, 1]
+    
+    # 5. 更新滑动窗口
+    buffer_s1.append(next_s1)
+    buffer_s2.append(next_s2)
+```
 
 ---
 
-## 五、关键矩阵公式
+## 四、训练 vs 推理区别总结
 
-### 1. 层次化嵌入融合 (Hierarchical Embedding)
-$$X_{emb} = ([E_{s1}; E_{s2}]) W_{fusion} + b_{fusion}$$
-其中 $W_{fusion} \in \mathbb{R}^{2D_{model} \times D_{model}}$。这是一个降维融合操作。
+```mermaid
+graph TD
+    subgraph Training [训练阶段: 并行计算]
+    T_Input[完整历史 Token序列] --> T_Trans[Transformer]
+    T_Trans --> T_Ctx[上下文 Feature]
+    T_Ctx --> T_Head1[Head 1] --> T_Loss1[S1 Loss]
+    
+    T_GtS1[真实 S1 Token] -.-> T_Dep[Dependency Layer]
+    T_Ctx -.-> T_Dep
+    T_Dep --> T_Head2[Head 2] --> T_Loss2[S2 Loss]
+    end
 
-### 2. 依赖感知层 (Dependency Aware Layer)
-这是一个特殊的层，用于在给定 $S_1$ 的情况下细化上下文以预测 $S_2$。
+    subgraph Inference [推理阶段: 自回归循环]
+    I_Input[历史 Buffer] --> I_Trans[Transformer]
+    I_Trans --> I_Ctx[上下文 Feature]
+    I_Ctx --> I_Head1[Head 1] 
+    I_Head1 --采样--> I_PredS1[预测 S1]
+    
+    I_PredS1 --> I_Dep[Dependency Layer]
+    I_Ctx -.-> I_Dep
+    I_Dep --> I_Head2[Head 2]
+    I_Head2 --采样--> I_PredS2[预测 S2]
+    
+    I_PredS1 & I_PredS2 --> I_Update[更新 Buffer]
+    I_Update -.-> I_Input
+    end
+```
 
-$$Q = E_{s1} W_Q$$
-$$K = H_{ctx} W_K, \quad V = H_{ctx} W_V$$
-$$Attn = \text{Softmax}(\frac{(Q + \text{RoPE}) (K + \text{RoPE})^T}{\sqrt{d}}) V$$
-$$H_{s2} = \text{RMSNorm}(H_{ctx} + Attn W_O)$$
-
-*注*: 此处的 Cross Attention 使用了 `RoPE`，确保位置信息在 Query 和 Key 交互时的相对性。
-
-### 3. 双头输出 (Dual Head)
-虽然封装在 `DualHead` 类中，但实际上是两个独立的线性层：
-*   **S1 Projection**: $Logits_{s1} = H_{ctx} W_{s1} + b_{s1}$
-*   **S2 Projection**: $Logits_{s2} = H_{s2} W_{s2} + b_{s2}$
-
----
-
-## 六、自回归推理 (Autoregressive Inference)
-
-在 `auto_regressive_inference` 函数中 (L390+)，模型进行逐步生成。对于每一个时间步 $t$：
-
-1.  **Decode S1**:
-    *   输入历史 $(X_{0:t-1})$。
-    *   运行 Transformer 得到 $H_{ctx}^{(t)}$。
-    *   预测并采样得到 $\hat{s1}_t$。
-    *   输出: `s1_logits`, `context` ($H_{ctx}$)
-
-2.  **Decode S2**:
-    *   利用 $H_{ctx}^{(t)}$ 和 刚刚生成的 $\hat{s1}_t$。
-    *   通过 Dependency Layer 融合。
-    *   预测并采样得到 $\hat{s2}_t$。
-
-3.  **Update**:
-    *   将 $(\hat{s1}_t, \hat{s2}_t)$ 加入历史序列，进入 $t+1$ 步。
-
-这种机制确保了 $S_2$ 的生成不仅依赖历史，还强依赖于同构的 $S_1$，保证了粗细粒度的一致性。
+| 特性 | 训练阶段 (Train) | 推理阶段 (Inference) |
+| :--- | :--- | :--- |
+| **S1 来源** | 使用 Ground Truth (真实) $S_1$ | 使用模型刚刚预测并采样的 $\hat{S_1}$ |
+| **S2 依赖** | 依赖真实的 $S_1$ | 依赖刚刚预测出的 $\hat{S_1}$ |
+| **计算模式** | $t=0 \to T$ 同时计算 | $t$ 时刻计算必须等待 $t-1$ 时刻完成 |
+| **DropOut** | 启用 | 禁用 |
