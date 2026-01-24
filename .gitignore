@@ -28,7 +28,7 @@ MANIFEST
 .idea/
 
 # VS Code
-# .vscode/
+.vscode/
 
 # macOS
 .DS_Store
@@ -45,6 +45,7 @@ Desktop.ini
 
 # Data files (large files)
 *.feather
+*.csv
 *.parquet
 *.h5
 *.hdf5
