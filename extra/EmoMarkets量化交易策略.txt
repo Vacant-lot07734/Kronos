@@ -1,0 +1,1574 @@
+# -*- coding: utf-8 -*-
+#更新内容(基于V3更新)：
+# 1.优化了handle_data中关于股票降仓和清仓的卖单可能存在冲突的问题，增加了函数_cancel_open_orders，并在handle_data和
+#   sell_and_confirm做了相应的修改，保证在每次挂出卖单前都会先把该股票已有的未成交的卖单委托撤销，从而解决可能存在
+#   的卖单冲突问题，也可以防止多次重复挂出相同的卖单。
+# 2.增加函数_save_all_state、_load_all_state、_load_all_state_init和_load_all_state_daily，支持写入和读取所有全局配置参数、
+#   全局状态变量和持仓股票的独立止盈止损参数。其中_load_all_state_init在策略创建或重启成功时加载所有变量和参数，
+#   _load_all_state_daily每天开盘前加载所有全局配置参数和持仓股票的独立止盈止损参数。
+# 5.优化了股票清仓后没有及时删除其最高价信息导致错误止盈bug。
+
+# ========= 聚宽：离线信号驱动的日内交易策略（实盘版-V32-new） ==========
+from jqdata import *
+from jqfactor import *
+import pandas as pd
+import numpy as np
+from io import StringIO, BytesIO
+import datetime as dt
+import json
+
+# --------------- 配置区 ---------------
+
+# 离线信号文件（已上传至研究环境根目录）
+SELECTED_STOCK_CSV_NAME = 'select_top_stocks_by_EmoMarkets.csv'
+# 总状态文件
+ALL_STATE_FILE = 'emoMarket_all_state.json'
+
+
+# 基准指数（沪深300）
+MARKET_INDEX = '000300.XSHG'
+
+# 仓位/权重
+WEIGHT_CAP_PER_STOCK = 0.25      # 单票权重上限（0~1），默认 20%
+WEIGHT_METHOD = 'softmax'        # 'softmax' | 'linear'
+SOFTMAX_TEMP = 10.0              # softmax 温度（数值越小越尖锐）
+
+# 限价买入
+LIMIT_DISCOUNT = 0.0          # 限价回撤幅度（0%）：买入触发价 = 参考价*(1-折扣)
+
+# 风控参数
+RUN_MARKET_STOPLOSS = True       # 是否启用大盘止损
+STOPLOSS_MARKET_RATIO = 0.95     # 大盘止损阈值（成分股 close/open 的均值 ≤ 0.95）
+TRAILING_PROFIT_START = 0.1     # 跟踪止盈启动：浮盈≥20%
+TRAILING_STOP_LOSS = 0.05       # 跟踪止盈回撤：回撤≥8%
+FIXED_STOP_LOSS = 0.95           # 固定止损：当前价 < 成本×0.9
+
+# 尾盘风控
+USE_HV = True                    # 放量风控
+HV_DURATION = 120                # 历史窗口天数
+HV_RATIO = 0.90                  # 当日量 > 历史最大×0.9（历史不含今日）
+
+# 基础过滤（候选股“硬筛”）
+MIN_LISTING_DAYS = 60            # 上市≥60天
+MIN_AVG_MONEY_60 = 2e7           # 近60日日均成交额≥2000万
+MIN_PRICE = 2.5                  # 当前价≥2.5元
+MAX_GAP_OPEN = 0.04              # 开盘缺口绝对值≤4%（延时入场时再过滤）
+EXCLUDE_LIMITUP_AT_OPEN = True   # 开盘涨停/接近涨停不买
+
+MAX_STOCK_NUM = 5
+# —— 固定止损触发的“隔日停开仓”阈值 ——
+FIXED_STOP_SKIP_THRESHOLD = 5   # 当日固定止损触发数量 ≥ 5 → 下一交易日不开仓
+MAX_HOLD_DAYS = 4 # 股票最大持仓天数
+
+CHECK_HOLDING_TIME    = '09:20'
+MORNING_PREP_TIME     = '09:26'
+ENTRY_BUY_TIME        = '09:35'
+TRADE_AFTERNOON_TIME  = '14:20'
+DYNAMIC_REDUCE_TIME   = '15:25'
+SAVE_STATE_TIME       = '15:28'  
+
+# -------------------------------------
+
+def initialize(context):
+    # 统一从 ALL_STATE_FILE 恢复（含 global_state）
+    _load_all_state_init(context)   
+    
+    set_benchmark(MARKET_INDEX)
+    set_option('use_real_price', True)
+    set_option('avoid_future_data', True)
+    log.set_level('order', 'error')
+    set_slippage(PriceRelatedSlippage(3/10000))
+    set_order_cost(OrderCost(open_tax=0, close_tax=0.001,
+                             open_commission=0.0003, close_commission=0.0003,
+                             min_commission=5), type='stock')
+
+    # 运行时状态
+    g.stock_high_price = {}
+    g.yesterday_HL_list = []
+    g.no_trading_today_signal = False
+    g.block_buy_today = False
+        
+    # —— 隔日停开仓所需的运行时状态（新加） ——
+    g.fixed_stop_count_today = 0       # 当日“固定止损”触发次数计数器（仅统计固定止损，不含跟踪止盈回撤）
+    g.schedule_skip_next_days = 0      # 今日盘中触发后，预约“下一交易日要跳过开仓”的天数（只会设为1）
+    g.skip_entry_days = 0              # 还需跳过开仓的交易日计数（早盘递减）
+    g.block_new_entries_today = False  # 今日是否禁止开仓（由 morning_prep 决定）
+    
+    # 当日已计数过固定止损的股票（去重）
+    g.fixed_stopped_names_today = set() 
+    
+    # === NEW: 买入与止损容器 ===
+    # 由风控触发的“待清仓”股票集合（去重）
+    g.stoploss_set = set()       # set[str]
+    
+    # 当日降仓股票字典{持仓股票代码: 降仓后目标市值}
+    g.dynamic_reduce_targets = {}
+    
+    g.equity_peak = 0.0 # 账户总价值峰值
+    
+    # 新增：个股止盈止损参数容器
+    g.stock_risk_params = {}
+    
+     # 每天读取选股结果
+    selected_stock_df = _load_csv(SELECTED_STOCK_CSV_NAME)
+    selected_stock_df['score'] = pd.to_numeric(selected_stock_df['pred_return'], errors='coerce')
+
+    g.signals_by_day = {
+        day: sub[['jq_code', 'name', 'score']].copy().reset_index(drop=True)
+        for day, sub in selected_stock_df.groupby('trade_date')
+    }
+
+    # 调度：分拆为多个阶段
+    run_daily(check_holding_days,   time=CHECK_HOLDING_TIME)
+    run_daily(morning_prep,         time=MORNING_PREP_TIME)
+    run_daily(entry_buy,            time=ENTRY_BUY_TIME)
+    run_daily(trade_afternoon,      time=TRADE_AFTERNOON_TIME)
+    run_daily(dynamic_position_reduce, time=DYNAMIC_REDUCE_TIME)
+    
+    # ========= 新增：收盘后保存全局状态 =========
+    run_daily(_save_all_state, time=SAVE_STATE_TIME)
+    
+def _save_all_state(context):
+    """
+    每日收盘前调用一次：
+    将【配置参数 + 调度时间 + 全局跨日状态 + 个股止盈止损参数】统一写入 ALL_STATE_FILE。
+    """
+
+    # ---------- 1) 配置参数 ----------
+    params_block = {
+        'SELECTED_STOCK_CSV_NAME': SELECTED_STOCK_CSV_NAME,
+        'ALL_STATE_FILE': ALL_STATE_FILE,
+        'MARKET_INDEX': MARKET_INDEX,
+
+        'WEIGHT_CAP_PER_STOCK': WEIGHT_CAP_PER_STOCK,
+        'WEIGHT_METHOD': WEIGHT_METHOD,
+        'SOFTMAX_TEMP': SOFTMAX_TEMP,
+        'LIMIT_DISCOUNT': LIMIT_DISCOUNT,
+
+        'RUN_MARKET_STOPLOSS': RUN_MARKET_STOPLOSS,
+        'STOPLOSS_MARKET_RATIO': STOPLOSS_MARKET_RATIO,
+        'TRAILING_PROFIT_START': TRAILING_PROFIT_START,
+        'TRAILING_STOP_LOSS': TRAILING_STOP_LOSS,
+        'FIXED_STOP_LOSS': FIXED_STOP_LOSS,
+
+        'USE_HV': USE_HV,
+        'HV_DURATION': HV_DURATION,
+        'HV_RATIO': HV_RATIO,
+
+        'MIN_LISTING_DAYS': MIN_LISTING_DAYS,
+        'MIN_AVG_MONEY_60': MIN_AVG_MONEY_60,
+        'MIN_PRICE': MIN_PRICE,
+        'MAX_GAP_OPEN': MAX_GAP_OPEN,
+        'EXCLUDE_LIMITUP_AT_OPEN': EXCLUDE_LIMITUP_AT_OPEN,
+
+        'MAX_STOCK_NUM': MAX_STOCK_NUM,
+        'FIXED_STOP_SKIP_THRESHOLD': FIXED_STOP_SKIP_THRESHOLD,
+        'MAX_HOLD_DAYS':MAX_HOLD_DAYS,
+    }
+
+    # ---------- 2) 调度时间 ----------
+    schedule_block = {
+        'CHECK_HOLDING_TIME': CHECK_HOLDING_TIME,
+        'MORNING_PREP_TIME': MORNING_PREP_TIME,
+        'ENTRY_BUY_TIME': ENTRY_BUY_TIME,
+        'TRADE_AFTERNOON_TIME': TRADE_AFTERNOON_TIME,
+        'DYNAMIC_REDUCE_TIME': DYNAMIC_REDUCE_TIME,
+        'SAVE_STATE_TIME': SAVE_STATE_TIME,
+    }
+
+    # ---------- 3) 全局跨日状态 ----------
+    global_state_block = {}
+
+    # 3.1 账户价值峰值
+    try:
+        cur_total = float(context.portfolio.total_value)
+    except Exception:
+        cur_total = 0.0
+    equity_peak = getattr(g, 'equity_peak', cur_total)
+    if not isinstance(equity_peak, (int, float)):
+        try:
+            equity_peak = float(equity_peak)
+        except Exception:
+            equity_peak = cur_total
+    global_state_block['equity_peak'] = equity_peak
+
+    # 3.2 最高价账本
+    shp = getattr(g, 'stock_high_price', {})
+    if isinstance(shp, dict):
+        global_state_block['stock_high_price'] = {
+            str(k): float(v) for k, v in shp.items() if v is not None
+        }
+    else:
+        global_state_block['stock_high_price'] = {}
+
+    # 3.3 隔日停开仓控制
+    global_state_block['schedule_skip_next_days'] = int(
+        getattr(g, 'schedule_skip_next_days', 0) or 0
+    )
+    global_state_block['skip_entry_days'] = int(
+        getattr(g, 'skip_entry_days', 0) or 0
+    )
+
+    # 3.4 跨日减仓目标
+    dyn = getattr(g, 'dynamic_reduce_targets', {})
+    global_state_block['dynamic_reduce_targets'] = dyn
+
+    # 3.5 待清仓集合
+    sl_set = getattr(g, 'stoploss_set', set())
+    global_state_block['stoploss_set'] = list(sl_set)
+
+    # 3.6 时间戳
+    try:
+        global_state_block['save_time'] = context.current_dt.strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        global_state_block['save_time'] = ''
+
+    # ---------- 4) 个股止盈止损参数 ----------
+    per_stock_out = {}
+    existing = getattr(g, 'per_stock_risk_params', {}) or {}
+
+    for code, pos in context.portfolio.positions.items():
+        if getattr(pos, 'total_amount', 0) <= 0:
+            continue
+
+        p = existing.get(code, {})
+
+        try:
+            tp = float(p.get('trailing_profit_start', TRAILING_PROFIT_START))
+        except Exception:
+            tp = float(TRAILING_PROFIT_START)
+
+        try:
+            ts = float(p.get('trailing_stop_loss', TRAILING_STOP_LOSS))
+        except Exception:
+            ts = float(TRAILING_STOP_LOSS)
+
+        try:
+            fx = float(p.get('fixed_stop_loss', FIXED_STOP_LOSS))
+        except Exception:
+            fx = float(FIXED_STOP_LOSS)
+
+        per_stock_out[str(code)] = {
+            "trailing_profit_start": tp,
+            "trailing_stop_loss": ts,
+            "fixed_stop_loss": fx,
+        }
+
+    # ---------- 5) 打包写文件 ----------
+    all_state = {
+        'params': params_block,
+        'schedule': schedule_block,
+        'global_state': global_state_block,
+        'per_stock_risk': per_stock_out,
+    }
+
+    try:
+        txt = json.dumps(all_state, ensure_ascii=False, indent=4, sort_keys=True)
+        write_file(ALL_STATE_FILE, txt)  # 如果是 PTrade 没有 write_file，就改成 with open
+        log.info("[AllState] 已保存全部状态到文件: {}".format(ALL_STATE_FILE))
+    except Exception as e:
+        log.info("[AllState] 保存全部状态失败: {}".format(e))
+
+def _load_all_state(context, load_global_state=True):
+    """
+    从 ALL_STATE_FILE 读入：
+      - 配置参数（params）
+      - 调度时间（schedule）
+      - 全局状态（global_state）：只有在 load_global_state=True 时才覆盖 g.*
+      - 个股止盈止损参数（per_stock_risk）
+    """
+    global SELECTED_STOCK_CSV_NAME, ALL_STATE_FILE, MARKET_INDEX
+    global WEIGHT_CAP_PER_STOCK, WEIGHT_METHOD, SOFTMAX_TEMP
+    global LIMIT_DISCOUNT
+    global RUN_MARKET_STOPLOSS, STOPLOSS_MARKET_RATIO, TRAILING_PROFIT_START, TRAILING_STOP_LOSS, FIXED_STOP_LOSS
+    global USE_HV, HV_DURATION, HV_RATIO
+    global MIN_LISTING_DAYS, MIN_AVG_MONEY_60, MIN_PRICE, MAX_GAP_OPEN, EXCLUDE_LIMITUP_AT_OPEN
+    global MAX_STOCK_NUM, FIXED_STOP_SKIP_THRESHOLD, MAX_HOLD_DAYS
+    global CHECK_HOLDING_TIME, MORNING_PREP_TIME, ENTRY_BUY_TIME, TRADE_AFTERNOON_TIME, DYNAMIC_REDUCE_TIME, SAVE_STATE_TIME
+
+    try:
+        txt = read_file(ALL_STATE_FILE)
+    except Exception as e:
+        log.info("[AllState] 状态文件不存在或读取失败({})，沿用代码默认参数".format(e))
+        return
+
+    # 兼容 bytes / str
+    if isinstance(txt, (bytes, bytearray)):
+        try:
+            txt = txt.decode('utf-8')
+        except Exception:
+            txt = str(txt)
+
+    try:
+        all_data = json.loads(txt)
+    except Exception as e:
+        log.info("[AllState] 状态文件解析失败({})，沿用默认参数".format(e))
+        return
+
+    params   = all_data.get('params', {})
+    sched    = all_data.get('schedule', {})
+    g_state  = all_data.get('global_state', {})
+    risk_raw = all_data.get('per_stock_risk', {})
+
+    # ---------- 1) 恢复配置参数 ----------
+    SELECTED_STOCK_CSV_NAME = str(params.get('SELECTED_STOCK_CSV_NAME', SELECTED_STOCK_CSV_NAME))
+    ALL_STATE_FILE          = str(params.get('ALL_STATE_FILE', ALL_STATE_FILE))
+    MARKET_INDEX            = str(params.get('MARKET_INDEX', MARKET_INDEX))
+
+    WEIGHT_CAP_PER_STOCK = float(params.get('WEIGHT_CAP_PER_STOCK', WEIGHT_CAP_PER_STOCK))
+    WEIGHT_METHOD        = str(params.get('WEIGHT_METHOD', WEIGHT_METHOD))
+    SOFTMAX_TEMP         = float(params.get('SOFTMAX_TEMP', SOFTMAX_TEMP))
+
+    LIMIT_DISCOUNT       = float(params.get('LIMIT_DISCOUNT', LIMIT_DISCOUNT))
+
+    RUN_MARKET_STOPLOSS   = bool(params.get('RUN_MARKET_STOPLOSS', RUN_MARKET_STOPLOSS))
+    STOPLOSS_MARKET_RATIO = float(params.get('STOPLOSS_MARKET_RATIO', STOPLOSS_MARKET_RATIO))
+    TRAILING_PROFIT_START = float(params.get('TRAILING_PROFIT_START', TRAILING_PROFIT_START))
+    TRAILING_STOP_LOSS    = float(params.get('TRAILING_STOP_LOSS', TRAILING_STOP_LOSS))
+    FIXED_STOP_LOSS       = float(params.get('FIXED_STOP_LOSS', FIXED_STOP_LOSS))
+
+    USE_HV      = bool(params.get('USE_HV', USE_HV))
+    HV_DURATION = int(params.get('HV_DURATION', HV_DURATION))
+    HV_RATIO    = float(params.get('HV_RATIO', HV_RATIO))
+
+    MIN_LISTING_DAYS = int(params.get('MIN_LISTING_DAYS', MIN_LISTING_DAYS))
+    MIN_AVG_MONEY_60 = float(params.get('MIN_AVG_MONEY_60', MIN_AVG_MONEY_60))
+    MIN_PRICE        = float(params.get('MIN_PRICE', MIN_PRICE))
+    MAX_GAP_OPEN     = float(params.get('MAX_GAP_OPEN', MAX_GAP_OPEN))
+    EXCLUDE_LIMITUP_AT_OPEN = bool(params.get('EXCLUDE_LIMITUP_AT_OPEN', EXCLUDE_LIMITUP_AT_OPEN))
+
+    MAX_STOCK_NUM             = int(params.get('MAX_STOCK_NUM', MAX_STOCK_NUM))
+    FIXED_STOP_SKIP_THRESHOLD = int(params.get('FIXED_STOP_SKIP_THRESHOLD', FIXED_STOP_SKIP_THRESHOLD))
+    MAX_HOLD_DAYS = int(params.get('MAX_HOLD_DAYS', MAX_HOLD_DAYS))
+
+    # ---------- 2) 恢复调度时间 ----------
+    CHECK_HOLDING_TIME    = sched.get('CHECK_HOLDING_TIME', CHECK_HOLDING_TIME)
+    MORNING_PREP_TIME     = sched.get('MORNING_PREP_TIME', MORNING_PREP_TIME)
+    ENTRY_BUY_TIME        = sched.get('ENTRY_BUY_TIME', ENTRY_BUY_TIME)
+    TRADE_AFTERNOON_TIME  = sched.get('TRADE_AFTERNOON_TIME', TRADE_AFTERNOON_TIME)
+    DYNAMIC_REDUCE_TIME   = sched.get('DYNAMIC_REDUCE_TIME', DYNAMIC_REDUCE_TIME)
+    SAVE_STATE_TIME       = sched.get('SAVE_STATE_TIME', SAVE_STATE_TIME)
+    
+    log.info("[AllState] 已恢复 params 段内容")
+
+    # ---------- 3) 视情况恢复全局状态 ----------
+    if load_global_state:
+        # 3.1 equity_peak
+        try:
+            cur_total = float(context.portfolio.total_value)
+        except Exception:
+            cur_total = 0.0
+        equity_peak = g_state.get('equity_peak', cur_total)
+        try:
+            equity_peak = float(equity_peak)
+        except Exception:
+            equity_peak = cur_total
+        g.equity_peak = equity_peak
+
+        # 3.2 stock_high_price
+        shp = g_state.get('stock_high_price', {})
+        g.stock_high_price = {}
+        if isinstance(shp, dict):
+            for k, v in shp.items():
+                try:
+                    g.stock_high_price[str(k)] = float(v)
+                except Exception:
+                    continue
+
+        # 3.3 skip 相关计数
+        try:
+            g.schedule_skip_next_days = int(g_state.get('schedule_skip_next_days', 0) or 0)
+        except Exception:
+            g.schedule_skip_next_days = 0
+
+        try:
+            g.skip_entry_days = int(g_state.get('skip_entry_days', 0) or 0)
+        except Exception:
+            g.skip_entry_days = 0
+
+        # 3.4 dynamic_reduce_targets
+        dyn = g_state.get('dynamic_reduce_targets', {})
+        g.dynamic_reduce_targets = {}
+        if isinstance(dyn, dict):
+            for k, v in dyn.items():
+                try:
+                    g.dynamic_reduce_targets[str(k)] = int(v)
+                except Exception:
+                    continue
+
+        # 3.5 stoploss_set
+        sl_list = g_state.get('stoploss_set', [])
+        g.stoploss_set = set()
+        if isinstance(sl_list, (list, tuple, set)):
+            for code in sl_list:
+                g.stoploss_set.add(str(code))
+
+        log.info("[AllState] 已恢复 global_state 段内容")
+
+    # ---------- 4) 恢复个股止盈止损参数 ----------
+    out = {}
+    if isinstance(risk_raw, dict):
+        for code, p in risk_raw.items():
+            if not isinstance(p, dict):
+                continue
+            try:
+                tp = float(p.get('trailing_profit_start', TRAILING_PROFIT_START))
+            except Exception:
+                tp = float(TRAILING_PROFIT_START)
+
+            try:
+                ts = float(p.get('trailing_stop_loss', TRAILING_STOP_LOSS))
+            except Exception:
+                ts = float(TRAILING_STOP_LOSS)
+
+            try:
+                fx = float(p.get('fixed_stop_loss', FIXED_STOP_LOSS))
+            except Exception:
+                fx = float(FIXED_STOP_LOSS)
+
+            out[str(code)] = {
+                "trailing_profit_start": tp,
+                "trailing_stop_loss": ts,
+                "fixed_stop_loss": fx,
+            }
+
+    g.per_stock_risk_params = out
+    log.info("[AllState] 已恢复 per_stock_risk 段内容, 条数={}".format(len(out)))
+    
+def _load_all_state_init(context):
+    """
+    Initialize 阶段调用：配置 + 调度 + 全局状态 + 个股止盈止损 全部恢复。
+    """
+    _load_all_state(context, load_global_state=True)
+
+
+def _load_all_state_daily(context):
+    """
+    每日盘前调用（例如在 morning_prep 最前面）：
+    只更新【配置 + 调度时间 + 个股止盈止损】，
+    不覆盖 g.equity_peak / g.dynamic_reduce_targets / g.stoploss_set 等全局状态。
+    """
+    _load_all_state(context, load_global_state=False)
+
+
+def _enqueue_stoploss(stock):
+    """把股票加入止损集合（风控触发时调用；去重）。"""
+    if stock:
+        g.stoploss_set.add(stock)
+
+# ---------- 工具：代码转换 ----------
+def ts_to_jq(ts_code: str) -> str:
+    if ts_code.endswith('.SZ'):
+        return ts_code.replace('.SZ', '.XSHE')
+    if ts_code.endswith('.SH'):
+        return ts_code.replace('.SH', '.XSHG')
+    if ts_code.endswith('.BJ'):
+        return ts_code.replace('.BJ', '.XBEI')
+    return ts_code
+    
+# ---- 指数成分获取）----
+def get_index_members_on(date):
+    try:
+        return set(get_index_stocks(MARKET_INDEX, date=date))
+    except:
+        return set()
+
+def get_index_members_safe(context):
+    d = context.previous_date
+    current_index_members = get_index_members_on(d)
+    return current_index_members
+    
+# === NEW: 读取“第二天看跌”列表（兼容 jq_code 或 ts_code）===
+def _load_csv(CSV_NAME):
+    if CSV_NAME is None:
+        log.info(f"[PredDown] 未找到 {CSV_NAME}，跳过。")
+        return []
+        
+    txt = read_file(CSV_NAME)
+
+    buf = BytesIO(txt) if isinstance(txt, (bytes, bytearray)) else StringIO(txt)
+    
+    df = pd.read_csv(buf, dtype={'trade_date': str, 'ts_code': str, 'name': str}, encoding='utf-8')
+    df['jq_code'] = df['ts_code'].map(ts_to_jq)
+     
+    return df
+
+def check_holding_days(context):
+    """
+    若某持仓“从建仓日到昨⽇）”的总交易日数 ≥ MAX_HOLD_DAYS，则清仓。
+    """
+    today = context.current_dt.date()
+    print(today)
+    for stock, pos in context.portfolio.positions.items():
+        # 无有效持仓或无建仓时间跳过
+        if pos.total_amount <= 0 or pos.init_time is None:
+            continue
+
+        entry_date = pos.init_time.date() 
+        # 用交易日口径计算“从建仓日到今⽇（含）”的天数
+        days_from_entry_date = get_trade_days(entry_date, end_date=today) # 获取的日期包含今⽇
+        print(days_from_entry_date)
+        if (len(days_from_entry_date)-1) >= MAX_HOLD_DAYS:
+            _enqueue_stoploss(stock)
+            log.info("{} 持仓时间达到 {} 天，清仓".format(stock, MAX_HOLD_DAYS))
+            
+def get_trade_day_n_days_ago(context, n):
+    """
+    返回：今天之前第 n 个交易日的日期字符串，格式 'YYYYMMDD'
+    例：n=1 表示上一交易日，n=2 表示上上个交易日
+    """
+
+    # JoinQuant: 只返回交易日（包含 end_date 之前的所有交易日）
+    # count=n+1 是为了包含“今天”这一点，然后往前数 n 个
+    trade_days = get_trade_days(end_date=context.current_dt.date(), count=n+1)
+
+    if len(trade_days) <= n:
+        # 理论上不太会发生，除非回测起点太近
+        raise ValueError("历史交易日不足，无法回溯 {} 个交易日".format(n))
+
+    # trade_days 类似 [..., 第(n+1)个倒数, 第n个倒数, ..., 最后一个<=今天]
+    target_day = trade_days[-(n+1)]
+    return target_day.strftime('%Y%m%d')
+
+# ---------- 09:26 卖/清扫 + 计算目标 ----------
+def morning_prep(context):
+    today = context.current_dt.strftime('%Y%m%d')
+    
+    # 每天加载全局配置参数与持仓股票止盈止损参数，方便每天改动
+    # 每个交易日盘前，只刷新配置 + 调度 + 个股止盈止损参数
+    _load_all_state_daily(context)
+    
+    # === 指数成分股缓存：优先用“当日”成分股，兜底用“昨日” ===
+    try:
+        today_date = context.current_dt.date()
+        members_today = get_index_stocks(MARKET_INDEX, date=today_date)
+        if members_today:
+            g.index_members = set(members_today)
+        else:
+            # 兜底：若当日为空（极少数异常），退回前一交易日
+            g.index_members = get_index_members_safe(context)
+    except Exception:
+        # 再兜底：任何异常都退回前一交易日
+        g.index_members = get_index_members_safe(context)
+
+    
+    g.block_buy_today = False          # 盘中触发的大盘止损只影响当日
+    g.no_trading_today_signal = False  # 当日是否有信号，后面会根据实际再设置
+    
+    current_data = get_current_data()
+    
+    # —— 开盘：处理跨日停开仓调度 & 复位计数（新加） ——
+    # 把“昨日盘中预约”的停开仓天数转入正式计数器（只会是1）
+    if getattr(g, 'schedule_skip_next_days', 0) > 0:
+        g.skip_entry_days += g.schedule_skip_next_days
+        g.schedule_skip_next_days = 0
+
+    # 判断今天是否需要“禁止新开仓”
+    g.block_new_entries_today = (g.skip_entry_days > 0)
+
+    # 今天如果禁开仓，那么这个“禁令”用掉一天
+    if g.skip_entry_days > 0:
+        g.skip_entry_days -= 1
+    g.skip_entry_days = max(0, g.skip_entry_days)
+
+    # 重置当日“固定止损去重集合”和计数器
+    g.fixed_stopped_names_today = set()
+    g.fixed_stop_count_today = 0
+
+    g.exposure_cap_today = 1
+    
+    # 大盘止损 + 个股风控（卖出为主）
+    sell_stocks(context)
+    
+    # 记录最高价账本
+    refresh_high_price_book(context)
+    update_yesterday_HL_list(context)
+
+    # 读取当信号
+    nth = 1
+    day_nth_ago = get_trade_day_n_days_ago(context, nth)
+    print(day_nth_ago)
+    
+    today_df = g.signals_by_day.get(day_nth_ago, None)
+    if today_df is None or today_df.empty:
+        g.target_values = {}
+        g.no_trading_today_signal = True
+        log.info('[{}] 无信号，跳过'.format(today))
+        return
+    
+    if len(today_df) > MAX_STOCK_NUM:
+        today_df = today_df.head(MAX_STOCK_NUM)
+    
+    # 建一个 {jq_code -> pred_open_d1} 的映射（可能有 NaN）
+    pred_open_map_all = {}
+
+    # 基础过滤（不含开盘缺口/涨停过滤，延时入场时再检查一次）
+    base_filtered = base_filter(today_df, context, use_gap_filter=False)
+    print(base_filtered)
+    
+    # 保存“过滤后仍在候选池”的预测开盘价
+    if not base_filtered.empty:
+        g.pred_open_map = {s: float(pred_open_map_all.get(s, np.nan))
+                           for s in base_filtered['jq_code'].tolist()}
+    else:
+        g.pred_open_map = {}
+    
+    # === NEW: 计算个股开仓系数 ===
+    entry_factors = {}
+    if not base_filtered.empty:
+        entry_factors = compute_entry_position_factors(base_filtered['jq_code'].tolist(), context)
+    
+    # 生成目标权重/市值（仅计算，不立即买）
+    target_weights = compute_target_weights(
+        base_filtered, current_data,
+        cap=WEIGHT_CAP_PER_STOCK,
+        method=WEIGHT_METHOD, temp=SOFTMAX_TEMP,
+        entry_factors=entry_factors
+    )
+    
+    portfolio_total = float(context.portfolio.total_value)
+
+    # 原始目标市值（不考虑cap）
+    raw_targets = {s: float(w) * portfolio_total for s, w in target_weights.items()}
+
+    # ---- 仅根据“指数成交量分档”限制当日新增建仓总额 ----
+    cap = float(getattr(g, 'exposure_cap_today', 1.0))
+    allowed = float(cap * portfolio_total)
+
+    # 注意：把 dict_values 转成 list 再求和，避免类型问题
+    vals = list(raw_targets.values())
+    # 兜底处理 NaN/inf
+    try:
+        raw_sum = float(np.nansum(vals)) if vals else 0.0
+    except Exception:
+        raw_sum = float(sum(v for v in vals if isinstance(v, (int, float))))
+
+    if raw_sum > 0.0 and allowed < raw_sum:
+        scale = allowed / raw_sum
+    else:
+        scale = 1.0
+
+    g.target_values = {s: float(v * scale) for s, v in raw_targets.items()}
+    log.info("[CapScale] cap={0:.2f}, allowed={1:.0f}, raw_sum={2:.0f}, scale={3:.3f}".format(cap, allowed, raw_sum, scale))
+
+# ---------- 09:35 入场 ----------
+def entry_buy(context):
+    """
+    延时入场/限价挂单入场（当日有效）。
+    依赖：
+      - g.no_trading_today_signal, g.target_values (由 morning_prep 计算)
+      - LIMIT_DISCOUNT: 0.0
+      - base_filter(..., use_gap_filter=True)
+    """
+    if getattr(g, 'no_trading_today_signal', False):
+        log.info("[SkipEntry] 今日没有买入信号，禁止新开仓")
+        return
+    if not getattr(g, 'target_values', None):
+        return
+    if getattr(g, 'block_buy_today', False):
+        log.info("[SkipEntry] 今日已触发大盘止损，禁止新开仓")
+        return
+    if getattr(g, 'block_new_entries_today', False):
+        log.info("[SkipEntry] 因上一交易日固定止损数量达到阈值，今日暂停新开仓")
+        return
+
+    target_values = {s: g.target_values[s] for s in list(g.target_values.keys())}
+    if not target_values:
+        log.info('[entry] 无可买标的')
+        return
+
+    current_data = get_current_data()
+
+    syms = list(target_values.keys())
+
+    # 计算参考价
+    ref_prices = {}
+    try:
+        bars = get_bars(syms, count=1, unit='1m', fields=['open'],
+                        include_now=True, df=False)
+        for s in syms:
+            try:
+                ref_prices[s] = float(bars[s]['open'][-1])
+            except Exception:
+                ref_prices[s] = current_data[s].last_price or 0.0
+
+    except Exception:
+        for s in syms:
+            ref_prices[s] = current_data[s].last_price or 0.0
+
+    # 触发价 = 参考价 * (1 - 折扣)
+    limit_prices = {s: float(max(0.01, ref_prices.get(s, 0.0)) * (1.0 - float(LIMIT_DISCOUNT)))
+                    for s in syms}
+
+    # 取消同标的未成交旧单，避免叠单
+    try:
+        for od in get_open_orders().values():
+            if od.security in syms:
+                try:
+                    cancel_order(od)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    
+
+    # 下单
+    placed = 0
+    base_cap = float(context.portfolio.total_value * 0.05)
+    # base_cap = min(float(context.portfolio.total_value * 0.05), 2000)
+    for s, tgt in target_values.items():
+        if tgt < base_cap:
+            continue
+        if s not in current_data or current_data[s].paused:
+            continue
+        lp = limit_prices.get(s, None)
+        if lp is None or lp <= 0:
+            continue
+        
+        try:
+            last_px = current_data[s].last_price
+            # if last_px is not None:
+            if last_px is not None and last_px <= lp:
+                order_target_value(s, tgt)
+                # buy_shares = int(tgt / last_px)              # 向下取整到股
+                # buy_shares = (buy_shares // 100) * 100
+                # order(s, buy_shares)
+                log.info("[fallback触发] {} last={:.2f} ≤ {:.2f} → 市价下单 {:.0f}".format(s, last_px, lp, tgt))
+                placed += 1
+        except Exception as e:
+            log.info("[entry下单失败] {s}: {e}".format(s=s, e=e))
+
+    if placed > 0:
+        refresh_high_price_book(context)
+
+# === NEW: 每分钟运行 ===
+def handle_data(context, data):
+    """
+    1) 买入队列：当前最新价 < 上一分钟收盘价 ⇒ 下单买入目标市值，并从队列移除
+    2) 止损集合：当前最新价 > 上一分钟收盘价 ⇒ 清仓，并从集合移除
+    """
+    cd = get_current_data()
+    now = context.current_dt
+    
+    intraday_risk_checks(context)
+    
+    refresh_high_price_book(context)
+    
+    # ---------- 股票降仓 ----------
+    min_value = context.portfolio.total_value * 0.05
+    if g.dynamic_reduce_targets:
+        for s, target_shares in list(g.dynamic_reduce_targets.items()):
+            if s not in cd or cd[s].paused:
+                continue
+            
+            pos = context.portfolio.positions.get(s, None)
+            
+            if pos is None:
+                # 持仓仓位低于目标仓位，从字典里清掉
+                g.dynamic_reduce_targets.pop(s, None)
+                continue
+            
+            cur_shares = getattr(pos, 'total_amount', 0)
+            closeable = getattr(pos, 'closeable_amount', cur_shares)
+    
+            # 如果当前总仓位已经 <= 目标仓位，或者已经没有可卖数量，直接移出降仓字典
+            if cur_shares <= target_shares or closeable <= 0:
+                g.dynamic_reduce_targets.pop(s, None)
+                continue
+            
+            bars = get_price(s, end_date=now, frequency='1m', fields=['close'],
+                             count=2, panel=False, skip_paused=False, fq='pre')
+            if bars is None or len(bars) < 2:
+                continue
+            
+            prev_price = float(bars['close'].iloc[0])
+            curr_price = float(cd[s].last_price)
+
+            # 条件：当前 < 上一分钟 → 卖出
+            if curr_price < prev_price:
+                try:
+                    # 先撤掉该标的所有未完成卖单委托，避免旧卖单占用头寸
+                    _cancel_open_orders(s)
+                    
+                    order_target(s, target_shares)
+        
+                    log.info("[DynamicReduce.SELL] {} cur_shares={}, target_shares={}".format(
+                                s, cur_shares, target_shares))
+                except Exception as e:
+                    log.info("[DynamicReduce.SELL_FAIL] {} 下单失败: {}".format(s, e))
+                    continue
+                    
+                cur_value = pos.value
+                if cur_value < min_value:
+                    if sell_and_confirm(context, s):
+                        g.stock_high_price.pop(s, None)
+                        log.info("[DynamicReduce] {} 价值过小，已确认清仓".format(s))
+
+    # ---------- 卖出逻辑（止损集合） ----------
+    for s in list(g.stoploss_set):
+        if s not in cd or cd[s].paused:
+            continue
+    
+        bars = get_price(s, end_date=now, frequency='1m', fields=['close'],
+                         count=2, panel=False, skip_paused=False, fq='pre')
+        if bars is None or len(bars) < 2:
+            continue
+        
+        prev_price = float(bars['close'].iloc[0])
+        curr_price = float(cd[s].last_price)
+        
+        # 条件：当前 < 上一分钟 → 卖出
+        if curr_price < prev_price:
+            if sell_and_confirm(context, s):
+                g.stoploss_set.discard(s)
+                g.stock_high_price.pop(s, None)
+                log.info("[确认清仓成功] {}".format(s))
+
+# ---------- 个股/大盘风控（卖出为主） ----------
+def sell_stocks(context):
+    # 大盘止损
+    if RUN_MARKET_STOPLOSS:
+        try:
+            idx_stocks = list(g.index_members) if getattr(g, 'index_members', None) else list(get_index_members_safe(context))
+            if idx_stocks:
+                stock_df = get_price(idx_stocks, end_date=context.previous_date, frequency='daily',
+                                     fields=['close','open'], count=1, panel=False)
+                if not stock_df.empty:
+                    down_ratio = (stock_df['close'] / stock_df['open']).mean()
+                    if down_ratio <= STOPLOSS_MARKET_RATIO:
+                        g.block_buy_today = True
+                        for stock in list(context.portfolio.positions.keys()):
+                            _enqueue_stoploss(stock)
+                            # order_target_value(stock, 0)
+                        g.no_trading_today_signal = True
+                        log.info("[大盘止损] 清仓（均值={:.3f}）".format(ratio))
+                        return
+        except Exception as e:
+            log.info("[市场止损检查失败] {}".format(e))
+            
+def _safe_index_daily(index, end_date, fields, count):
+    """
+    获取指数日线。若目标字段（如 volume / money）取不到或全 NaN，则退化为成分股汇总。
+    始终返回包含 'time' 列的 DataFrame。
+    """
+    def _ensure_time_column(df):
+        if df is None or df.empty:
+            return df
+        if 'time' not in df.columns:
+            if getattr(df.index, 'inferred_type', None) in ('datetime64', 'datetime'):
+                df = df.copy()
+                df['time'] = df.index
+                df.reset_index(drop=True, inplace=True)
+            else:
+                df = df.copy()
+                df['time'] = pd.to_datetime(df.index)
+                df.reset_index(drop=True, inplace=True)
+        return df
+    
+    try:
+        df = get_price(index, end_date=end_date, frequency='daily',
+                       fields=fields, count=count, panel=False)
+        df = _ensure_time_column(df)
+
+        # 若任何目标字段需要回退，则用成分股汇总
+        need_aggregate = False
+        if df is None or df.empty:
+            need_aggregate = True
+        else:
+            for f in fields:
+                if f in ('volume', 'money'):
+                    if f not in df.columns or df[f].isna().all():
+                        need_aggregate = True
+                        break
+
+        if need_aggregate:
+            members = list(getattr(g, 'index_members', []))
+            if not members:
+                try:
+                    # 这里没有 context，只能用 end_date 推断口径：end_date 是“到昨天的日线”时，
+                    # 用 end_date 作为 date 取成分也能保证历史一致性
+                    members = list(get_index_stocks(index, date=end_date))
+                except Exception:
+                    members = []
+                    
+            if members:
+                mdf = get_price(members, end_date=end_date, frequency='daily',
+                                fields=list(set(fields) & set(['volume','money'])),
+                                count=count, panel=False)
+                if mdf is not None and not mdf.empty:
+                    if 'time' not in mdf.columns:
+                        if getattr(mdf.index, 'inferred_type', None) in ('datetime64', 'datetime'):
+                            mdf = mdf.copy()
+                            mdf['time'] = mdf.index
+                            mdf.reset_index(drop=True, inplace=True)
+                        else:
+                            mdf = mdf.copy().reset_index(drop=False)
+                            if 'index' in mdf.columns:
+                                mdf.rename(columns={'index': 'time'}, inplace=True)
+                    agg = mdf.groupby('time', as_index=False).sum(numeric_only=True)
+
+                    for f in fields:
+                        if f not in agg.columns:
+                            agg[f] = np.nan
+                    df = agg
+
+        df = _ensure_time_column(df)
+        return df
+    except Exception:
+        return None
+
+
+# ---------- 10:00 盘中风控 ----------
+def intraday_risk_checks(context):
+    current_data = get_current_data()
+    
+    risk_cfg = getattr(g, 'stock_risk_params', {})
+     
+    for stock in list(context.portfolio.positions.keys()):
+        if stock not in current_data or current_data[stock].paused:
+            continue
+        pos = context.portfolio.positions[stock]
+        cost = pos.avg_cost
+        px = current_data[stock].last_price or pos.price
+        if px is None or cost is None or cost <= 0:
+            continue
+
+        gain = (px - cost) / cost
+        
+        params = risk_cfg.get(stock, {})
+        trailing_profit_start = float(params.get('trailing_profit_start', TRAILING_PROFIT_START))
+        trailing_stop_loss    = float(params.get('trailing_stop_loss', TRAILING_STOP_LOSS))
+        fixed_stop_loss       = float(params.get('fixed_stop_loss', FIXED_STOP_LOSS))
+        
+        if gain >= trailing_profit_start:
+            g.stock_high_price[stock] = max(g.stock_high_price.get(stock, px), px)
+            high = g.stock_high_price[stock]
+            if high > 0 and (high - px) / high >= trailing_stop_loss:
+                _enqueue_stoploss(stock)
+                # order_target_value(stock, 0)
+                log.info("[盘中] 跟踪止盈触发 {}".format(stock))
+                continue
+        else:
+            g.stock_high_price[stock] = max(g.stock_high_price.get(stock, px), px)
+
+        if px < cost * fixed_stop_loss:
+            _enqueue_stoploss(stock)
+            # order_target_value(stock, 0)
+            log.info("[盘中] 固定止损触发 {}".format(stock))
+
+            # —— 只在当日首次对该股票计数 —— 
+            if stock not in g.fixed_stopped_names_today:
+                g.fixed_stopped_names_today.add(stock)
+                g.fixed_stop_count_today = getattr(g, 'fixed_stop_count_today', 0) + 1
+                if g.fixed_stop_count_today >= FIXED_STOP_SKIP_THRESHOLD:
+                    if getattr(g, 'schedule_skip_next_days', 0) == 0:
+                        g.schedule_skip_next_days = 1
+            continue
+
+
+# ---------- 14:20 尾盘风控 ----------
+def trade_afternoon(context):
+    if g.no_trading_today_signal:
+        return
+    check_limit_up(context)
+    if USE_HV:
+        check_high_volume(context)
+    huanshou(context)
+
+def check_limit_up(context):
+    if not g.yesterday_HL_list:
+        return
+    now_time = context.current_dt
+    for stock in list(g.yesterday_HL_list):
+        pos = context.portfolio.positions.get(stock, None)
+        if pos is None or pos.closeable_amount <= 0:
+            continue
+        try:
+            current_data = get_price(stock, end_date=now_time, frequency='1m',
+                                     fields=['close','high_limit'], skip_paused=False,
+                                     fq='pre', count=1, panel=False, fill_paused=True)
+            if current_data.empty:
+                continue
+            current_close = current_data.iloc[0, 0]
+            high_limit = current_data.iloc[0, 1]
+            if current_close < high_limit:
+                # close_position(pos)
+                _enqueue_stoploss(stock)
+                try:
+                    g.yesterday_HL_list.remove(stock)
+                except:
+                    pass
+        except Exception as e:
+            log.info("[check_limit_up_break失败] {}: {}".format(stock, e))
+
+def check_high_volume(context):
+    current_data = get_current_data()
+    for stock in list(context.portfolio.positions.keys()):
+        if current_data[stock].paused:
+            continue
+        if current_data[stock].last_price == current_data[stock].high_limit:
+            continue
+        if context.portfolio.positions[stock].closeable_amount <= 0:
+            continue
+        try:
+            dfv = get_bars(stock, count=HV_DURATION+1, unit='1d', fields=['volume'], include_now=True, df=True)
+            if dfv.empty or len(dfv) < 2:
+                continue
+            today_vol = dfv['volume'].values[-1]
+            hist_max = dfv['volume'].values[:-1].max()  # 历史不含今日
+            if hist_max > 0 and today_vol > HV_RATIO * hist_max:
+                pos = context.portfolio.positions[stock]
+                # close_position(pos)
+                _enqueue_stoploss(stock)
+                log.info("[HV] {} 当日量{:.0f} > {:.0%}×历史最大{:.0f} → 卖出".format(
+                    stock, today_vol, HV_RATIO, hist_max))
+        except Exception as e:
+            log.info("[check_high_volume失败] {}: {}".format(stock, e))
+
+def huanshou(context):
+    current_data = get_current_data()
+    shrink = 0.003
+    expand = 0.10
+    for stock in list(context.portfolio.positions.keys()):
+        if current_data[stock].paused:
+            continue
+        if current_data[stock].last_price >= current_data[stock].high_limit * 0.97:
+            continue
+        if context.portfolio.positions[stock].closeable_amount <= 0:
+            continue
+        try:
+            rt = huanshoulv(context, stock, is_avg=False)
+            avg = huanshoulv(context, stock, is_avg=True)
+            if avg == 0:
+                continue
+            r = rt / avg
+            action = None
+            if avg < shrink:
+                action = '缩量'
+            elif rt > expand and r > 2:
+                action = '放量'
+            if action:
+                pos = context.portfolio.positions[stock]
+                # close_position(pos)
+                _enqueue_stoploss(stock)
+                log.info("{} {} 换手率:{:.2%} 均:{:.2%} 倍率:{:.1f}x → 卖出".format(action, stock, rt, avg, r))
+        except Exception as e:
+            log.info("huanshou 失败 {}: {}".format(stock, e))
+
+def huanshoulv(context, stock, is_avg=False):
+    if is_avg:
+        end_date = context.previous_date
+        dfv = get_price(stock, end_date=end_date, frequency='daily', fields=['volume'], count=20)
+        dfc = get_valuation(stock, end_date=end_date, fields=['circulating_cap'], count=1)
+        if dfv is None or dfv.empty or dfc is None or dfc.empty:
+            return 0.0
+        cap_e = dfc['circulating_cap'].iloc[0]  # 亿股
+        if cap_e <= 0:
+            return 0.0
+        dfv['turnover_ratio'] = dfv['volume'] / (cap_e * 1e4)  
+        return float(dfv['turnover_ratio'].mean())
+    else:
+        now = context.current_dt
+        dfv = get_price(stock, start_date=now.date(), end_date=now, frequency='1m',
+                        fields=['volume'], skip_paused=False, fq='pre', panel=True, fill_paused=False)
+        if dfv is None or 'volume' not in dfv:
+            return 0.0
+        vol = dfv['volume'].sum()
+        pre = context.previous_date
+        dfc = get_valuation(stock, end_date=pre, fields=['circulating_cap'], count=1)
+        if dfc is None or dfc.empty:
+            return 0.0
+        cap_e = dfc['circulating_cap'].iloc[0]
+        if cap_e <= 0:
+            return 0.0
+        return float(vol / (cap_e * 1e4))     
+        
+# 持仓股票降仓函数（按目标股数）
+def dynamic_position_reduce(context):
+    """
+    持仓降仓逻辑（只生成目标股数字典，不直接下单）：
+    1) 对每只持仓股票，根据当日涨跌幅 & 量比分类到 9 种量价关系；
+    2) 给每种量价关系一个基础风险分数；
+    3) 若盈利 > 10% 或亏损 > 5%，在基础风险分数上再加一档；
+    4) 根据风险分数映射到降仓比例；
+    5) 用 当前持仓股数 * (1 - 降仓比例) 得到目标持仓股数；
+    6) 若目标持仓对应的市值 < 总资金 5%，则将目标股数设为 0（清仓）；
+    7) 所有结果写入全局字典 g.dynamic_reduce_targets：
+      - key: 股票代码
+      - value: 降仓后的目标股数（int）
+    """
+    current_data = get_current_data()
+    total_value = float(context.portfolio.total_value)
+    starting_cash = float(context.portfolio.starting_cash)
+
+    if not hasattr(g, 'equity_peak') or g.equity_peak <= 0:
+        g.equity_peak = total_value
+    else:
+        g.equity_peak = max(g.equity_peak, total_value)
+
+    if g.equity_peak > 0:
+        drawdown_ratio = (g.equity_peak - total_value) / g.equity_peak   # 例如 0.05 表示回撤 5%
+    else:
+        drawdown_ratio = 0.0
+
+    # 重置当日的降仓目标字典
+    g.dynamic_reduce_targets = {}
+    
+    LOOKBACK = 20
+
+    for stock, pos in list(context.portfolio.positions.items()):
+        # 1. 无仓 / 停牌 / ST 跳过
+        if pos.total_amount <= 0:
+            continue
+        if stock not in current_data or current_data[stock].paused or current_data[stock].is_st:
+            continue
+
+        try:
+            # 2. 取最近 21 个交易日日线（含今日）
+            bars = get_bars(
+                stock, count=LOOKBACK+1, unit='1d',
+                fields=['close', 'money'],
+                include_now=True, df=True
+            )
+            if bars is None or len(bars) < 3:
+                continue
+
+            close_today = float(bars['close'].iloc[-1])
+            close_yest  = float(bars['close'].iloc[-2])
+            if close_yest <= 0:
+                continue
+
+            volume_today = float(bars['money'].iloc[-1])
+            hist_vol = bars['money'].iloc[:-1]
+            if len(hist_vol) < 5:
+                continue
+
+            avg_vol_n = float(hist_vol.tail(LOOKBACK).mean())
+            if avg_vol_n <= 0:
+                continue
+
+            # === 当日涨跌幅 & 量比 ===
+            ret_today = close_today / close_yest - 1.0
+            vol_ratio = volume_today / avg_vol_n
+
+            # 3. 涨跌方向分类：up / down / flat
+            if ret_today >= 0.01:
+                price_dir = 'up'
+            elif ret_today <= -0.01:
+                price_dir = 'down'
+            else:
+                price_dir = 'flat'
+
+            # 4. 量状态分类：high / normal / low
+            if vol_ratio >= 1.1:
+                vol_regime = 'high'
+            elif vol_ratio <= 0.8:
+                vol_regime = 'low'
+            else:
+                vol_regime = 'normal'
+                
+            cost = pos.avg_cost
+            if cost is None or cost <= 0:
+                continue
+            profit_ratio = close_today / cost - 1.0
+            
+            reduce_ratio = 0
+            if profit_ratio >= 0.10:
+                if price_dir == 'up' and vol_regime == 'low':
+                    reduce_ratio = 0.10
+                elif price_dir == 'flat' and vol_regime == 'high':
+                    reduce_ratio = 0.10 
+                elif price_dir == 'down' and vol_regime in ('normal', 'low'):
+                    reduce_ratio = 0.30  
+                elif price_dir == 'down' and vol_regime == 'high':
+                    reduce_ratio = 0.50
+                else:
+                    reduce_ratio = 0.0
+            
+            elif profit_ratio <= -0.05:
+                if price_dir == 'down' and vol_regime in ('normal', 'low'):
+                    reduce_ratio = 0.5
+                elif price_dir == 'down' and vol_regime == 'high':
+                    reduce_ratio = 1.0   # 清仓
+                else:
+                    reduce_ratio = 0.0
+                    
+            elif drawdown_ratio >= 0.05 and profit_ratio < 0:
+                reduce_ratio = max(reduce_ratio, 1.0)
+
+            # === 基于“股数”计算目标持仓 ===
+            cur_shares = int(pos.total_amount)
+            if cur_shares <= 0:
+                continue
+
+            # 原始目标股数
+            raw_target_shares = cur_shares * (1.0 - reduce_ratio)
+            
+            # 向下取整到 100 股的整数倍（不足 100 直接变成 0）
+            target_shares = int(raw_target_shares // 100 * 100)
+            
+            # 保险起见，再夹一下范围，保证 0 <= target_shares <= cur_shares
+            target_shares = max(0, min(target_shares, cur_shares))
+
+            # 写入全局降仓目标字典（按“股数”）
+            g.dynamic_reduce_targets[stock] = target_shares
+
+            log.info("[DynamicReduce] {} ret={:.2%}, vol_ratio={:.2f}, 盈亏={:.2%}, reduce={:.0%}, cur_shares={}, target_shares={}".format
+                    (stock, ret_today, vol_ratio, profit_ratio, reduce_ratio * 100, cur_shares, target_shares))
+
+        except Exception as e:
+            log.info("[DynamicReduce] 处理 {} 出错: {}".format(stock, e))
+
+def close_position(position) -> bool:
+    """
+    清仓指定持仓（以目标市值0下单）。
+    
+    输入参数：
+        position: 聚宽持仓对象（PortfolioPosition）
+    
+    输出返回：
+        bool，清仓操作是否成功（订单完全成交）
+    """
+    security = position.security
+    try:
+        order = order_target_value(security, 0)  # 目标市值0，即清仓
+        if order is not None:
+            # 检查订单状态：已提交且完全成交
+            return order.status == OrderStatus.held and order.filled == order.amount
+        return False
+    except Exception:
+        return False
+    
+def _order_fully_filled(order) -> bool:
+    """
+    判断订单是否已完全成交。
+    说明：聚宽的 Order.status = OrderStatus.held 且 filled == amount 通常表示已完全成交。
+    """
+    try:
+        return (
+            order is not None
+            and order.status == OrderStatus.held
+            and getattr(order, 'filled', 0) == getattr(order, 'amount', 0)
+        )
+    except Exception:
+        return False
+        
+def _cancel_open_orders(security):
+    """
+    撤掉某只股票所有未完成的卖单委托。
+    用于避免旧单挂着导致新单下不出去或“持仓不足”等问题。
+    """
+    # 1) 通过 get_open_orders 撤单
+    try:
+        open_orders = get_open_orders()
+        if not open_orders:
+            return
+
+        for od in list(open_orders.values()):
+            try:
+                if od.security == security and not od.is_buy:
+                    cancel_order(od)
+                    log.info("[CancelOpen] 撤销未完成委托: {} (amount={}, filled={})".format(
+                        security, getattr(od, 'amount', None), getattr(od, 'filled', None)
+                    ))
+            except Exception as e:
+                log.info("[CancelOpen] 撤销 {} 的委托失败: {}".format(security, e))
+    except Exception as e:
+        log.info("[CancelOpen] 获取 open_orders 失败: {}".format(e))
+
+def sell_and_confirm(context, security) -> bool:
+    """
+    尝试清仓并确认是否成功成交。
+    判定逻辑（任一条件满足视为成功）：
+      1) 订单对象显示完全成交；或
+      2) 无未完成委托，且持仓数量为 0。
+    """
+    try:
+        # ===== 先看可平仓数量，避免反复对 0 仓位下单 =====
+        pos = context.portfolio.positions.get(security, None)
+        total_amt = getattr(pos, 'total_amount', 0) if pos is not None else 0
+
+        if pos is None or total_amt <= 0:
+            log.info("[sell_and_confirm] {} 当前无可平仓仓位(total={}, closeable={})，视为已清仓".format(
+                security, total_amt, closeable))
+            return True
+            
+        #清仓前先撤掉该标的所有未完成卖单委托
+        _cancel_open_orders(security)
+        
+        order = order_target_value(security, 0)
+
+        # 条件1：订单已完全成交
+        if _order_fully_filled(order):
+            return True
+
+        # 条件2：检查是否仍有未完成委托 & 当前持仓
+        # 2a) 无该标的的未完成委托
+        try:
+            open_orders = get_open_orders()
+            has_open = any(o.security == security for o in open_orders.values()) if open_orders else False
+        except Exception:
+            has_open = False
+
+        # 2b) 当前是否仍有可见持仓
+        try:
+            pos = context.portfolio.positions.get(security, None)
+            has_position = (pos is not None and pos.total_amount > 0)
+        except Exception:
+            has_position = True  # 保守起见，读不到时当作还有仓位
+            
+        success = (not has_open) and (not has_position)
+
+        return success
+
+    except Exception:
+        return False
+
+# ---------- 基础过滤 ----------
+def base_filter(today_df: pd.DataFrame, context, use_gap_filter: bool) -> pd.DataFrame:
+    """
+    today_df: 必含 ['jq_code']；可含 'score'
+    use_gap_filter: 是否启用“开盘缺口/涨停”过滤（延时/入场阶段再开）
+    """
+    if today_df is None or today_df.empty:
+        return pd.DataFrame(columns=['jq_code','score'])
+
+    syms = today_df['jq_code'].tolist()
+    cd = get_current_data()
+
+    keep = []
+    # ST 过滤
+    try:
+        isst = get_extras('is_st', syms, start_date=context.current_dt.date(),
+                          end_date=context.current_dt.date())
+        st_map = {s: bool(isst[s][0]) for s in syms}
+    except:
+        st_map = {s: False for s in syms}
+
+    # 上市天数、低价、流动性、开盘缺口/涨停过滤
+    for _, r in today_df.iterrows():
+        s = r['jq_code']
+        sc = float(r.get('score', 0.0))
+        try:
+            # ST
+            if st_map.get(s, False):
+                continue
+            
+            if cd[s].paused:
+                continue
+
+            # 上市天数
+            info = get_security_info(s)
+            if info is None or info.start_date is None:
+                continue
+            days_listed = (context.current_dt.date() - info.start_date).days
+            if days_listed < MIN_LISTING_DAYS:
+                continue
+
+            # 价格
+            px = cd[s].last_price
+            if px is None or px <= 0 or px < MIN_PRICE:
+                continue
+
+            # 流动性：近60日日均成交额
+            bars = get_bars(s, count=60, unit='1d', fields=['money'], include_now=False, df=True)
+            if bars is None or bars.empty:
+                continue
+            if float(bars['money'].mean()) < MIN_AVG_MONEY_60:
+                continue
+
+            if use_gap_filter:
+                # 开盘缺口过滤 + 开盘涨停/接近涨停过滤
+                d = get_price(s, end_date=context.current_dt, frequency='daily',
+                              fields=['open','close','high_limit','low_limit'],
+                              count=2, panel=False)
+                if d is not None and len(d) == 2:
+                    prev_close = float(d['close'].iloc[0])
+                    today_open = float(d['open'].iloc[1])
+                    gap = abs(today_open / prev_close - 1.0)
+                    if gap > MAX_GAP_OPEN:
+                        continue
+                    if EXCLUDE_LIMITUP_AT_OPEN:
+                        high_lim = float(d['high_limit'].iloc[1])
+                        if today_open >= 0.999 * high_lim:
+                            continue
+
+            keep.append((s, sc))
+        except Exception:
+            continue
+
+    if not keep:
+        return pd.DataFrame(columns=['jq_code','score'])
+    ks, vs = zip(*keep)
+    return pd.DataFrame({'jq_code': ks, 'score': vs})
+
+def compute_entry_position_factors(codes, context):
+    """
+    计算股票开仓系数（仅基于昨日日线成交额比值映射，无风险值中转）
+    核心逻辑：通过个股昨日成交额与近5日平均成交额的比值（额比），直接映射开仓系数（0.8~1.0）
+    
+    返回值：
+    - dict，格式为 {股票代码: 开仓系数(float)}，仅包含有效计算的股票（过滤停牌/数据缺失标的）
+    """
+    cd = get_current_data()
+    factors = {}
+
+    LOOKBACK = 8
+    for s in codes:
+        try:
+            if s not in cd or cd[s].paused:
+                continue
+            
+            bars = get_bars(
+            s, count=LOOKBACK+1, unit='1d',
+            fields=['money'],          # 用成交额 money 就够了，close 不需要也可以去掉
+            include_now=False, df=True
+            )
+            if bars is None or len(bars) < 3:
+                continue
+            
+            # 昨日成交额
+            amt_yest = float(bars['money'].iloc[-1])
+            
+            # 历史成交额（不含昨日）
+            hist_amt = bars['money'].iloc[:-1]
+            if len(hist_amt) < 5:
+                continue
+            
+            # 近 20 日平均成交额
+            avg_amt_20 = float(hist_amt.tail(LOOKBACK).mean())
+            if avg_amt_20 <= 0:
+                continue
+            
+            # 昨日“额比” = 昨日成交额 / 近 20 日平均成交额
+            vol_ratio = amt_yest / avg_amt_20   # 名字可以继续叫 vol_ratio，不影响逻辑
+            
+            # === 直接映射到开仓系数 ===
+            factor = 1.0  # 默认不动
+            
+            if vol_ratio < 0.6:
+                factor = 0.6
+            elif vol_ratio < 0.8:
+                factor = 0.8
+            elif vol_ratio < 0.9:
+                factor = 0.9
+            elif vol_ratio < 1.1:
+                factor = 1.00
+            elif vol_ratio < 1.5:
+                factor = 0.90
+            else:  # vol_ratio >= 1.5
+                factor = 0.8
+                
+            log.info("[EntryFactor] {}: [vol_ratio]: {}, [factor]: {}".format(s, vol_ratio, factor))
+
+            factors[s] = float(factor)
+
+        except Exception as e:
+            log.info("[EntryFactor] 计算 {} 失败: {}".format(s, e))
+            continue
+
+    return factors
+
+def compute_target_weights(today_df: pd.DataFrame, current_data,
+                           cap=0.25, *, method='softmax', temp=10.0,
+                           entry_factors=None):
+    """
+    today_df: 必含 ['jq_code']；可含 'score'
+    entry_factors: 可选 dict, {stock: factor}，用于给个股调整开仓权重（如 0.5, 1.2 等）
+    """
+    if today_df is None or today_df.empty:
+        return {}
+
+    # -------- 1. 过滤停牌，拿到 (code, score) --------
+    candidates = []
+    for _, r in today_df.iterrows():
+        s = r['jq_code']
+        if s in current_data and current_data[s].paused:
+            continue
+        candidates.append((s, float(r.get('score', np.nan))))
+
+    if not candidates:
+        return {}
+
+    syms, scores = zip(*candidates)
+    scores = np.array(scores, dtype=float)
+    scores = np.where(np.isfinite(scores), scores, 0.0)
+    pos = np.clip(scores, a_min=0.0, a_max=None)
+
+    # -------- 2. 只根据 score 计算原始权重 base_weights --------
+    if pos.sum() <= 0:
+        eq = 1.0 / len(syms)
+        base_weights = {s: eq for s in syms}
+    else:
+        if method == 'softmax':
+            logits = pos / max(1e-6, temp)
+            logits -= np.max(logits)
+            raw = np.exp(logits)
+        else:
+            raw = pos
+
+        total = float(raw.sum())
+        if total <= 0:
+            eq = 1.0 / len(syms)
+            base_weights = {s: eq for s in syms}
+        else:
+            base_weights = {s: float(sc / total) for s, sc in zip(syms, raw)}
+
+    # -------- 3. 乘上个股开仓系数 entry_factors（可选） --------
+    if entry_factors is not None:
+        adj = {}
+        total_adj = 0
+        for s, w in base_weights.items():
+            # 没有配置时默认 1.0，不调整
+            f = float(entry_factors.get(s, 1.0))
+            adj[s] = w * f
+            total_adj += w * f
+
+        # 关键：这里一定要 sum(adj.values())，而不是 float(adj.values())
+        # total_adj = sum(adj.values())   # total_adj 是一个数字（float）
+
+        if total_adj > 0:
+            base_weights = {s: (w / total_adj) for s, w in adj.items()}
+        else:
+            # 极端情况：全部因子都是 0，退回均分
+            if adj:
+                eq = 1.0 / len(adj)
+                base_weights = {s: eq for s in adj.keys()}
+            else:
+                base_weights = {}
+
+    # -------- 4. 单票上限 cap --------
+    if cap is not None and 0.0 < cap < 1.0:
+        base_weights = {s: min(w, cap) for s, w in base_weights.items()}
+
+    return base_weights
+
+# ---------- 账本维护 ----------
+def update_yesterday_HL_list(context):
+    g.yesterday_HL_list = []
+    if not context.portfolio.positions:
+        return
+    for s in context.portfolio.positions.keys():
+        try:
+            df = get_price(s, end_date=context.previous_date, frequency='daily',
+                           fields=['close','high_limit'], count=1, panel=False)
+            if not df.empty and df['close'].iloc[0] >= df['high_limit'].iloc[0] * 0.9999:
+                g.yesterday_HL_list.append(s)
+        except:
+            pass
+
+def refresh_high_price_book(context):
+    for s in list(g.stock_high_price.keys()):  # 关键：用 list 做快照
+        pos = context.portfolio.positions.get(s, None)
+        if (pos is None) or (pos.total_amount <= 0):
+            g.stock_high_price.pop(s, None)
+            
+    cd = get_current_data()
+    for s in context.portfolio.positions.keys():
+        try:
+            px = cd[s].last_price
+            if px is None or px <= 0:
+                continue
+            g.stock_high_price[s] = max(g.stock_high_price.get(s, px), px)
+        except:
+            pass

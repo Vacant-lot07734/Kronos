@@ -1,0 +1,8 @@
+{
+    "start_time": "2026-01-10T07-16-21",
+    "save_directory": "./outputs/full_new_models1\\finetune_tokenizer_demo",
+    "world_size": 1,
+    "final_result": {
+        "best_val_loss": -0.020487492084503175
+    }
+}

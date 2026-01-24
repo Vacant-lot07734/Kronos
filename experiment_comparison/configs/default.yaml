@@ -1,0 +1,42 @@
+csv_dir: "../cache_data"       # 你的csv目录
+pattern: "000*.csv"
+max_files: null            # 训练时是否只取前N个文件，null=全量
+
+date_col: "datetime"
+features: ["open","high","low","close","vol","amount"]
+
+lookback: 20
+pred_len: 7
+
+# 时间切分（日线）
+train_end: "2024-12-31"
+val_end:   "2025-08-31"
+# test: > val_end
+
+# 训练参数
+batch_size: 256
+epochs: 50
+lr: 0.001
+patience: 8
+num_workers: 2
+
+# 模型参数
+hidden_dim: 128
+num_layers: 2
+dropout: 0.1
+
+# 输出目录
+ckpt_dir: "checkpoints"
+ckpt_name: "lstm_kline.pth"
+
+# ===== Informer params =====
+informer:
+  d_model: 128
+  n_heads: 4
+  e_layers: 2
+  d_layers: 1
+  d_ff: 256
+  dropout: 0.1
+  attn: "full"          # "prob" 或 "full"
+  factor: 5             # ProbSparse factor
+  label_len: 10         # decoder 输入中已知历史长度（<= lookback）
