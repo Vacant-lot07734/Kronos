@@ -12,8 +12,6 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-import comet_ml
-
 # Ensure project root is in path
 sys.path.append("../")
 from config import Config
@@ -27,6 +25,7 @@ from utils.training_utils import (
     get_model_size,
     format_time,
 )
+from utils.experiment_logger import build_experiment_logger
 
 
 def create_dataloaders(config: dict, rank: int, world_size: int):
@@ -148,7 +147,7 @@ def train_model(model, device, config, save_dir, logger, rank, world_size):
                 loss_scaled.backward()
 
             # --- Optimizer Step after Accumulation ---
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
@@ -162,11 +161,12 @@ def train_model(model, device, config, save_dir, logger, rank, world_size):
                 )
             if rank == 0 and logger:
                 avg_loss = current_batch_total_loss / config['accumulation_steps']
-                logger.log_metric('train_tokenizer_loss_batch', avg_loss, step=batch_idx_global_train)
-                logger.log_metric(f'train_vqvae_vq_loss_each_batch', bsq_loss.item(), step=batch_idx_global_train)
-                logger.log_metric(f'train_recon_loss_pre_each_batch', recon_loss_pre.item(), step=batch_idx_global_train)
-                logger.log_metric(f'train_recon_loss_each_batch', recon_loss_all.item(), step=batch_idx_global_train)
-                logger.log_metric('tokenizer_learning_rate', optimizer.param_groups[0]["lr"], step=batch_idx_global_train)
+                logger.log_metric('train_tokenizer_loss_batch', avg_loss, step=batch_idx_global_train, tb_tag='tokenizer/train/loss')
+                logger.log_metric(f'train_vqvae_vq_loss_each_batch', bsq_loss.item(), step=batch_idx_global_train, tb_tag='tokenizer/train/vq_loss')
+                logger.log_metric(f'train_recon_loss_pre_each_batch', recon_loss_pre.item(), step=batch_idx_global_train, tb_tag='tokenizer/train/recon_pre_loss')
+                logger.log_metric(f'train_recon_loss_each_batch', recon_loss_all.item(), step=batch_idx_global_train, tb_tag='tokenizer/train/recon_loss')
+                logger.log_metric('tokenizer_learning_rate', optimizer.param_groups[0]["lr"], step=batch_idx_global_train, tb_tag='tokenizer/train/learning_rate')
+                logger.log_metric('tokenizer_grad_norm_batch', grad_norm, step=batch_idx_global_train, tb_tag='tokenizer/train/grad_norm')
 
             batch_idx_global_train += 1
 
@@ -199,7 +199,8 @@ def train_model(model, device, config, save_dir, logger, rank, world_size):
             print(f"Time This Epoch: {format_time(time.time() - epoch_start_time)}")
             print(f"Total Time Elapsed: {format_time(time.time() - start_time)}\n")
             if logger:
-                logger.log_metric('val_tokenizer_loss_epoch', avg_val_loss, epoch=epoch_idx)
+                logger.log_metric('val_tokenizer_loss_epoch', avg_val_loss, epoch=epoch_idx, tb_tag='tokenizer/val/loss')
+                logger.log_metric('tokenizer_epoch_time_seconds', time.time() - epoch_start_time, epoch=epoch_idx, tb_tag='tokenizer/train/epoch_time_seconds')
 
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
@@ -234,16 +235,12 @@ def main(config: dict):
             'save_directory': save_dir,
             'world_size': world_size,
         }
-        if config['use_comet']:
-            comet_logger = comet_ml.Experiment(
-                api_key=config['comet_config']['api_key'],
-                project_name=config['comet_config']['project_name'],
-                workspace=config['comet_config']['workspace'],
-            )
-            comet_logger.add_tag(config['comet_tag'])
-            comet_logger.set_name(config['comet_name'])
-            comet_logger.log_parameters(config)
+        comet_logger = build_experiment_logger(config, save_dir)
+        master_summary['tensorboard_log_dir'] = getattr(comet_logger, 'tensorboard_log_dir', None)
+        if getattr(comet_logger, 'has_comet', False):
             print("Comet Logger Initialized.")
+        if getattr(comet_logger, 'has_tensorboard', False):
+            print(f"TensorBoard log dir: {comet_logger.tensorboard_log_dir}")
 
     dist.barrier()  # Ensure save directory is created before proceeding
 
@@ -254,6 +251,14 @@ def main(config: dict):
 
     if rank == 0:
         print(f"Model Size: {get_model_size(model.module)}")
+        trainable_params = sum(p.numel() for p in model.module.parameters() if p.requires_grad)
+        if comet_logger:
+            logger_text = json.dumps({
+                'tokenizer_model_size': get_model_size(model.module),
+                'tokenizer_trainable_parameters': trainable_params,
+            }, indent=2)
+            comet_logger.log_text('tokenizer/run_summary', f"```json\n{logger_text}\n```", step=0)
+            comet_logger.log_metric('tokenizer_trainable_parameters', trainable_params, step=0, tb_tag='tokenizer/model/trainable_parameters')
 
     # Start Training
     _, dt_result = train_model(
@@ -267,7 +272,8 @@ def main(config: dict):
             json.dump(master_summary, f, indent=4)
         print('Training finished. Summary file saved.')
         if comet_logger:
-            comet_logger.end()
+            comet_logger.log_metric('tokenizer_best_val_loss', dt_result['best_val_loss'], step=0, tb_tag='tokenizer/val/best_loss')
+            comet_logger.close()
 
     cleanup_ddp()
 

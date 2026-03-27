@@ -1,6 +1,6 @@
-numpy
-pandas
-torch>=2.0.0
+numpy=2.4.4
+pandas=2.2.2
+torch==2.9.0
 
 einops==0.8.1
 huggingface_hub==0.33.1
@@ -8,3 +8,8 @@ matplotlib==3.9.3
 pandas==2.2.2
 tqdm==4.67.1
 safetensors==0.6.2
+scipy==1.12
+
+tensorboard==2.20.0
+comet_ml==3.50.0
+pyqlib==0.9.7

@@ -250,17 +250,38 @@ You can also adjust other parameters like `instrument`, `train_time_range`, `epo
 
 ### Step 2: Prepare the Dataset
 
-Run the data preprocessing script. This script will load raw market data from your Qlib directory, process it, split it into training, validation, and test sets, and save them as pickle files.
+The canonical path now uses the shared workspace cache instead of a repo-local
+preprocessing entrypoint.
 
 ```shell
-python finetune/qlib_data_preprocess.py
+cd /home/yzh/workspace
+python -m zlab.cli.prepare_data \
+  --data-root /path/to/raw/daily_csv \
+  --context-length 20 \
+  --horizon 5
 ```
 
-After running, you will find `train_data.pkl`, `val_data.pkl`, and `test_data.pkl` in the directory specified by `dataset_path` in your config.
+This writes the normalized shared cache and split metadata under
+`workspace/zlab/cache/`. The Kronos finetune path reuses that cache and
+materializes a repo-compatible bundle automatically.
 
 ### Step 3: Run the Finetuning
 
-The finetuning process consists of two stages: finetuning the tokenizer and then the predictor. Both training scripts are designed for multi-GPU training using `torchrun`.
+The canonical path is the shared Python CLI:
+
+```shell
+cd /home/yzh/workspace
+python -m zlab.cli.run_kronos_finetune \
+  --dataset-id <dataset_id> \
+  --split-config-id <split_config_id> \
+  --run-name kronos_finetune_run \
+  --pretrained-tokenizer-path NeoQuasar/Kronos-Tokenizer-base \
+  --pretrained-predictor-path NeoQuasar/Kronos-base
+```
+
+Internally, the finetuning process still consists of two stages: finetuning the
+tokenizer and then the predictor. The repo-local training scripts remain the
+training core and are launched through the shared CLI.
 
 #### 3.1 Finetune the Tokenizer
 
@@ -286,14 +307,37 @@ The best predictor checkpoint will be saved to the path configured in `config.py
 
 ### Step 4: Evaluate with Backtesting
 
-Finally, run the backtesting script to evaluate your finetuned model. This script loads the models, performs inference on the test set, generates prediction signals (e.g., forecasted price change), and runs a simple top-K strategy backtest.
+The canonical evaluation path is also routed through the shared CLI. Zero-shot
+and finetuned checkpoints both feed into the same shared forecast-metric and
+Top-K backtest protocol.
+
+Zero-shot example:
 
 ```shell
-# Specify the GPU for inference
-python finetune/qlib_test.py --device cuda:0
+cd /home/yzh/workspace
+python -m zlab.cli.run_kronos_zero_shot \
+  --dataset-id <dataset_id> \
+  --split-config-id <split_config_id> \
+  --run-name kronos_zero_shot_run \
+  --tokenizer-path NeoQuasar/Kronos-Tokenizer-base \
+  --model-path NeoQuasar/Kronos-base
 ```
 
-The script will output a detailed performance analysis in your console and generate a plot showing the cumulative return curves of your strategy against the benchmark, similar to the one below:
+Backtest-only rerun from an existing signal table:
+
+```shell
+cd /home/yzh/workspace
+python -m zlab.cli.run_backtest \
+  --signal-path /path/to/signals.csv \
+  --output-dir /path/to/backtest_output
+```
+
+The legacy `finetune/qlib_test.py` script is still kept as a semantic reference
+for Kronos signal generation, but it is no longer the recommended public
+entrypoint.
+
+The shared backtest path outputs a detailed performance analysis and cumulative
+return plots similar to the one below:
 
 <p align="center">
     <img src="figures/backtest_result_example.png" alt="Backtest Example" align="center" width="700px" />

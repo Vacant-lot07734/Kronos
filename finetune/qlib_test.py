@@ -161,13 +161,15 @@ class QlibBacktest:
         })
         return report_df
 
-    def run_and_plot_results(self, signals: dict[str, pd.DataFrame]):
+    def run_and_plot_results(self, signals: dict[str, pd.DataFrame], plot_path: str | None = None, show_plot: bool = False):
         """
         Runs backtests for multiple signals and plots the cumulative return curves.
 
         Args:
             signals (dict[str, pd.DataFrame]): A dictionary where keys are signal names
                                                and values are prediction DataFrames.
+            plot_path (str | None): Optional custom output path for the backtest plot.
+            show_plot (bool): Whether to display the plot interactively.
         """
         return_df, ex_return_df, bench_df = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
@@ -196,8 +198,13 @@ class QlibBacktest:
         axes[1].set_ylabel("Cumulative Excess Return")
 
         plt.tight_layout()
-        plt.savefig("../figures/backtest_result_example.png", dpi=200)
-        plt.show()
+        final_plot_path = plot_path or "../figures/backtest_result_example.png"
+        os.makedirs(os.path.dirname(final_plot_path), exist_ok=True)
+        plt.savefig(final_plot_path, dpi=200)
+        if show_plot:
+            plt.show()
+        else:
+            plt.close(fig)
 
 
 # =================================================================================
@@ -303,6 +310,15 @@ def main():
     """Main function to set up config, run inference, and execute backtesting."""
     parser = argparse.ArgumentParser(description="Run Kronos Inference and Backtesting")
     parser.add_argument("--device", type=str, default="cuda:1", help="Device for inference (e.g., 'cuda:0', 'cpu')")
+    parser.add_argument("--tokenizer-path", type=str, help="Tokenizer path or Hugging Face model id.")
+    parser.add_argument("--model-path", type=str, help="Predictor path or Hugging Face model id.")
+    parser.add_argument("--data-path", type=str, help="Directory containing train/val/test pickle files.")
+    parser.add_argument("--result-save-path", type=str, help="Directory where predictions/backtest artifacts are saved.")
+    parser.add_argument("--result-name", type=str, help="Subdirectory name for this evaluation run.")
+    parser.add_argument("--pred-len", type=int, help="Override predict window during evaluation.")
+    parser.add_argument("--sample-count", type=int, help="Override inference sample_count.")
+    parser.add_argument("--plot-name", type=str, default="backtest_plot.png", help="Filename for the saved backtest plot.")
+    parser.add_argument("--show-plot", action="store_true", help="Display the plot interactively after saving it.")
     args = parser.parse_args()
 
     # --- 1. Configuration Setup ---
@@ -311,18 +327,18 @@ def main():
     # Create a dedicated dictionary for this run's configuration
     run_config = {
         'device': args.device,
-        'data_path': base_config.dataset_path,
-        'result_save_path': base_config.backtest_result_path,
-        'result_name': base_config.backtest_save_folder_name,
-        'tokenizer_path': base_config.finetuned_tokenizer_path,
-        'model_path': base_config.finetuned_predictor_path,
+        'data_path': args.data_path or base_config.dataset_path,
+        'result_save_path': args.result_save_path or base_config.backtest_result_path,
+        'result_name': args.result_name or base_config.backtest_save_folder_name,
+        'tokenizer_path': args.tokenizer_path or base_config.finetuned_tokenizer_path,
+        'model_path': args.model_path or base_config.finetuned_predictor_path,
         'max_context': base_config.max_context,
-        'pred_len': base_config.predict_window,
+        'pred_len': args.pred_len or base_config.predict_window,
         'clip': base_config.clip,
         'T': base_config.inference_T,
         'top_k': base_config.inference_top_k,
         'top_p': base_config.inference_top_p,
-        'sample_count': base_config.inference_sample_count,
+        'sample_count': args.sample_count or base_config.inference_sample_count,
         'batch_size': base_config.backtest_batch_size,
     }
 
@@ -353,7 +369,8 @@ def main():
         model_preds = pickle.load(f)
 
     backtester = QlibBacktest(base_config)
-    backtester.run_and_plot_results(model_preds)
+    plot_path = os.path.join(save_dir, args.plot_name)
+    backtester.run_and_plot_results(model_preds, plot_path=plot_path, show_plot=args.show_plot)
 
 
 if __name__ == '__main__':

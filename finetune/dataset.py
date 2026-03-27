@@ -1,6 +1,9 @@
+import json
 import pickle
 import random
+
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from config import Config
@@ -42,6 +45,8 @@ class QlibDataset(Dataset):
             self.data = pickle.load(f)
 
         self.window = self.config.lookback_window + self.config.predict_window + 1
+        self.metadata = self._load_metadata()
+        self.prediction_start, self.prediction_end = self._resolve_prediction_range()
 
         self.symbols = list(self.data.keys())
         self.feature_list = self.config.feature_list
@@ -63,16 +68,49 @@ class QlibDataset(Dataset):
                 df['day'] = df['datetime'].dt.day
                 df['month'] = df['datetime'].dt.month
                 # Keep only necessary columns to save memory.
-                self.data[symbol] = df[self.feature_list + self.time_feature_list]
+                self.data[symbol] = df[['datetime'] + self.feature_list + self.time_feature_list]
 
                 # Add all valid starting indices for this symbol to the global list.
                 for i in range(num_samples):
-                    self.indices.append((symbol, i))
+                    if self._sample_in_prediction_range(df, i):
+                        self.indices.append((symbol, i))
 
         # The effective dataset size is the minimum of the configured iterations
         # and the total number of available samples.
         self.n_samples = min(self.n_samples, len(self.indices))
         print(f"[{data_type.upper()}] Found {len(self.indices)} possible samples. Using {self.n_samples} per epoch.")
+
+    def _load_metadata(self) -> dict:
+        metadata_path = f"{self.config.dataset_path}/metadata.json"
+        try:
+            with open(metadata_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+
+    def _resolve_prediction_range(self):
+        split_meta = self.metadata.get('splits', {}).get(self.data_type, {})
+        prediction_start = split_meta.get('prediction_start', split_meta.get('score_start'))
+        prediction_end = split_meta.get('prediction_end', split_meta.get('score_end'))
+        if not prediction_start or not prediction_end:
+            return None, None
+        return pd.Timestamp(prediction_start), pd.Timestamp(prediction_end)
+
+    def _sample_in_prediction_range(self, df, start_idx: int) -> bool:
+        if self.prediction_start is None or self.prediction_end is None:
+            return True
+
+        prediction_start_idx = start_idx + self.config.lookback_window
+        prediction_end_idx = prediction_start_idx + self.config.predict_window - 1
+        if prediction_start_idx >= len(df) or prediction_end_idx >= len(df):
+            return False
+
+        prediction_start_time = df.iloc[prediction_start_idx]['datetime']
+        prediction_end_time = df.iloc[prediction_end_idx]['datetime']
+        return (
+            self.prediction_start <= prediction_start_time
+            and prediction_end_time <= self.prediction_end
+        )
 
     def set_epoch_seed(self, epoch: int):
         """
@@ -105,9 +143,13 @@ class QlibDataset(Dataset):
                 - x_tensor (torch.Tensor): The normalized feature tensor.
                 - x_stamp_tensor (torch.Tensor): The time feature tensor.
         """
-        # Select a random sample from the entire pool of indices.
-        random_idx = self.py_rng.randint(0, len(self.indices) - 1)
-        symbol, start_idx = self.indices[random_idx]
+        # Keep training stochastic, but make validation index-driven so the
+        # DistributedSampler can deterministically shard samples across ranks.
+        if self.data_type == 'train':
+            sample_idx = self.py_rng.randint(0, len(self.indices) - 1)
+        else:
+            sample_idx = idx % len(self.indices)
+        symbol, start_idx = self.indices[sample_idx]
 
         # Extract the sliding window from the dataframe.
         df = self.data[symbol]
@@ -118,8 +160,14 @@ class QlibDataset(Dataset):
         x = win_df[self.feature_list].values.astype(np.float32)
         x_stamp = win_df[self.time_feature_list].values.astype(np.float32)
 
-        # Perform instance-level normalization.
-        x_mean, x_std = np.mean(x, axis=0), np.std(x, axis=0)
+        # Match inference-time scaling for A/B experiments by using only the
+        # historical lookback slice to estimate normalization statistics.
+        if self.config.normalize_with_context_only:
+            norm_source = x[:self.config.lookback_window]
+        else:
+            norm_source = x
+
+        x_mean, x_std = np.mean(norm_source, axis=0), np.std(norm_source, axis=0)
         x = (x - x_mean) / (x_std + 1e-5)
         x = np.clip(x, -self.config.clip, self.config.clip)
 
