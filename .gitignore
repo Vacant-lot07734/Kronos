@@ -48,6 +48,7 @@ Desktop.ini
 *.parquet
 *.h5
 *.hdf5
+*.csv
 cache_data
 examples/output
 

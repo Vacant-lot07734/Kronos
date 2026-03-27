@@ -1,0 +1,64 @@
+******官方提示******
+环境要求
+首先确保已安装 requirements.txt 中的所有依赖项
+本流程依赖 qlib，请通过以下命令安装：
+
+pip install pyqlib
+
+需要准备 Qlib 数据。请遵循 Qlib 官方指南 下载并在本地设置数据。示例脚本假定您使用日频数据
+步骤一：配置实验
+所有数据、训练和模型路径的设置均集中在 finetune/config.py 中。在运行任何脚本前，请根据您的环境修改以下路径：
+
+qlib_data_path: 您本地 Qlib 数据目录的路径。
+dataset_path: 用于保存处理后的训练/验证/测试 pickle 文件的目录。
+save_path: 保存模型检查点的基目录。
+backtest_result_path: 用于保存回测结果的目录。
+pretrained_tokenizer_path 和 pretrained_predictor_path: 您希望从中开始训练的预训练模型路径（可以是本地路径或 Hugging Face 模型名称）。
+您还可以调整其他参数，如 instrument、train_time_range、epochs 和 batch_size，以适应您的具体任务。如果不使用 Comet.ml，请设置 use_comet = False。
+
+步骤 2：准备数据集
+运行数据预处理脚本。该脚本将从您的 Qlib 目录加载原始市场数据，进行处理，将其分割为训练集、验证集和测试集，并保存为 pickle 文件。
+
+python finetune/qlib_data_preprocess.py
+
+运行后，您将在配置文件中 dataset_path 指定的目录中找到 train_data.pkl、val_data.pkl 和 test_data.pkl。
+
+步骤 3：运行微调
+微调过程包含两个阶段：首先微调分词器，然后微调预测器。两个训练脚本均设计为使用 torchrun 进行多 GPU 训练。
+
+3.1 微调分词器
+此步骤调整分词器以适应您特定领域的数据分布。
+
+# Replace NUM_GPUS with the number of GPUs you want to use (e.g., 2)
+torchrun --standalone --nproc_per_node=NUM_GPUS finetune/train_tokenizer.py
+
+最佳分词器检查点将被保存到 config.py 中配置的路径（该路径由 save_path 和 tokenizer_save_folder_name 派生而来）。
+
+3.2 微调预测器
+此步骤针对预测任务微调主要的 Kronos 模型。
+
+# Replace NUM_GPUS with the number of GPUs you want to use (e.g., 2)
+torchrun --standalone --nproc_per_node=NUM_GPUS finetune/train_predictor.py
+
+最佳预测器检查点将被保存到 config.py 中配置的路径。
+
+步骤 4：通过回测进行评估
+最后，运行回测脚本来评估您微调后的模型。该脚本会加载模型，在测试集上执行推理，生成预测信号（例如，预测价格变动），并运行一个简单的 Top-K 策略回测。
+
+# Specify the GPU for inference
+python finetune/qlib_test.py --device cuda:0
+
+脚本将在控制台输出详细的性能分析，并生成一张图表，显示您的策略相对于基准的累计收益曲线，类似于下图所示：
+
+******适应化改造******
+
+沿用官方 Qlib 预处理
+跳过 tokenizer 微调
+直接做 predictor 微调
+用官方回测脚本或其改造版评估
+
+也就是：
+qlib_data_preprocess.py：用
+train_tokenizer.py：先不做
+train_predictor.py：做
+qlib_test.py：做
