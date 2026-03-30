@@ -2,14 +2,13 @@ import os
 import sys
 import json
 import time
+import argparse
 from time import gmtime, strftime
 import torch.distributed as dist
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
-
-import comet_ml
 
 # Ensure project root is in path
 sys.path.append('../')
@@ -24,6 +23,101 @@ from utils.training_utils import (
     get_model_size,
     format_time
 )
+
+
+def create_comet_logger(config: dict):
+    if not config.get('use_comet'):
+        return None
+
+    try:
+        from comet_ml import Experiment
+    except ImportError as exc:
+        raise ImportError(
+            "comet_ml is not installed, but use_comet=True. "
+            "Install comet_ml or run train_predictor.py with --disable-comet."
+        ) from exc
+
+    logger = Experiment(
+        api_key=config['comet_config']['api_key'],
+        project_name=config['comet_config']['project_name'],
+        workspace=config['comet_config']['workspace'],
+    )
+    logger.add_tag(config['comet_tag'])
+    logger.set_name(config['comet_name'])
+    logger.log_parameters(config)
+    return logger
+
+
+def resolve_predictor_tokenizer_path(config: dict) -> str:
+    """Returns the tokenizer path to use for predictor finetuning."""
+    if config.get('predictor_tokenizer_path'):
+        return config['predictor_tokenizer_path']
+    if config.get('skip_tokenizer_finetune'):
+        return config['pretrained_tokenizer_path']
+    return config['finetuned_tokenizer_path']
+
+
+def apply_predictor_finetune_strategy(model: Kronos, config: dict, rank: int) -> None:
+    """
+    Optionally freezes most predictor layers for A/B experiments.
+
+    When `freeze_predictor_for_ab` is False, the original full-finetune behavior is preserved.
+    """
+    if not config.get('freeze_predictor_for_ab', False):
+        return
+
+    train_last_ratio = float(config.get('predictor_train_last_ratio', 1.0))
+    train_last_ratio = max(0.0, min(1.0, train_last_ratio))
+
+    for param in model.parameters():
+        param.requires_grad = False
+
+    total_layers = len(model.transformer)
+    train_from = max(0, int(total_layers * (1.0 - train_last_ratio)))
+
+    for layer_idx in range(train_from, total_layers):
+        for param in model.transformer[layer_idx].parameters():
+            param.requires_grad = True
+
+    for module in (model.norm, model.dep_layer, model.head):
+        for param in module.parameters():
+            param.requires_grad = True
+
+    if not config.get('freeze_embedding', False):
+        for param in model.embedding.parameters():
+            param.requires_grad = True
+
+    if config.get('train_time_embedding', False):
+        for param in model.time_emb.parameters():
+            param.requires_grad = True
+
+    if rank == 0:
+        print(
+            f"Applied predictor freeze strategy: training transformer layers "
+            f"[{train_from}, {total_layers - 1}], "
+            f"freeze_embedding={config.get('freeze_embedding', False)}, "
+            f"train_time_embedding={config.get('train_time_embedding', False)}"
+        )
+
+
+def compute_token_loss(model, logits, token_out, config: dict):
+    """
+    Computes either full-sequence loss or future-only loss.
+
+    The future-only slice aligns with the H-step prediction target:
+    token_out position `lookback_window - 1` corresponds to the first future bar.
+    """
+    if not config.get('future_only_loss', False):
+        return model.module.head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
+
+    start_idx = config['lookback_window'] - 1
+    end_idx = start_idx + config['predict_window']
+    return model.module.head.compute_loss(
+        logits[0][:, start_idx:end_idx, :],
+        logits[1][:, start_idx:end_idx, :],
+        token_out[0][:, start_idx:end_idx],
+        token_out[1][:, start_idx:end_idx],
+    )
 
 
 def create_dataloaders(config: dict, rank: int, world_size: int):
@@ -65,11 +159,16 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
     if rank == 0:
         effective_bs = config['batch_size'] * world_size
         print(f"Effective BATCHSIZE per GPU: {config['batch_size']}, Total: {effective_bs}")
+        print(f"Loss mode: {'future-only' if config.get('future_only_loss', False) else 'full-sequence'}")
 
     train_loader, val_loader, train_dataset, valid_dataset = create_dataloaders(config, rank, world_size)
 
+    trainable_params = [param for param in model.parameters() if param.requires_grad]
+    if not trainable_params:
+        raise RuntimeError("No trainable predictor parameters remain after applying the freeze strategy.")
+
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        trainable_params,
         lr=config['predictor_learning_rate'],
         betas=(config['adam_beta1'], config['adam_beta2']),
         weight_decay=config['adam_weight_decay']
@@ -106,7 +205,7 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
 
             # Forward pass and loss calculation
             logits = model(token_in[0], token_in[1], batch_x_stamp[:, :-1, :])
-            loss, s1_loss, s2_loss = model.module.head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
+            loss, s1_loss, s2_loss = compute_token_loss(model, logits, token_out, config)
 
             # Backward pass and optimization
             optimizer.zero_grad()
@@ -145,7 +244,7 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
                 token_out = [token_seq_0[:, 1:], token_seq_1[:, 1:]]
 
                 logits = model(token_in[0], token_in[1], batch_x_stamp[:, :-1, :])
-                val_loss, _, _ = model.module.head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
+                val_loss, _, _ = compute_token_loss(model, logits, token_out, config)
 
                 tot_val_loss_sum_rank += val_loss.item()
                 val_batches_processed_rank += 1
@@ -197,27 +296,23 @@ def main(config: dict):
             'world_size': world_size,
         }
         if config['use_comet']:
-            comet_logger = comet_ml.Experiment(
-                api_key=config['comet_config']['api_key'],
-                project_name=config['comet_config']['project_name'],
-                workspace=config['comet_config']['workspace'],
-            )
-            comet_logger.add_tag(config['comet_tag'])
-            comet_logger.set_name(config['comet_name'])
-            comet_logger.log_parameters(config)
+            comet_logger = create_comet_logger(config)
             print("Comet Logger Initialized.")
 
     dist.barrier()
 
     # Model Initialization
-    tokenizer = KronosTokenizer.from_pretrained(config['finetuned_tokenizer_path'])
+    tokenizer_path = resolve_predictor_tokenizer_path(config)
+    tokenizer = KronosTokenizer.from_pretrained(tokenizer_path)
     tokenizer.eval().to(device)
 
     model = Kronos.from_pretrained(config['pretrained_predictor_path'])
+    apply_predictor_finetune_strategy(model, config, rank)
     model.to(device)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
 
     if rank == 0:
+        print(f"Predictor tokenizer path: {tokenizer_path}")
         print(f"Predictor Model Size: {get_model_size(model.module)}")
 
     # Start Training
@@ -235,10 +330,57 @@ def main(config: dict):
     cleanup_ddp()
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Finetune the Kronos predictor model.")
+    parser.add_argument("--epochs", type=int, help="Override training epochs.")
+    parser.add_argument("--batch-size", type=int, help="Override batch size per GPU.")
+    parser.add_argument("--num-workers", type=int, help="Override dataloader workers.")
+    parser.add_argument("--predictor-learning-rate", type=float, help="Override predictor learning rate.")
+    parser.add_argument("--tokenizer-path", type=str, help="Tokenizer path/model id used during predictor finetuning.")
+    parser.add_argument("--save-folder-name", type=str, help="Checkpoint folder name under save_path.")
+    parser.add_argument("--use-pretrained-tokenizer", action="store_true", help="Skip tokenizer finetuning and use the pretrained tokenizer directly.")
+    parser.add_argument("--freeze-for-ab", action="store_true", help="Freeze lower predictor layers and only finetune the upper layers.")
+    parser.add_argument("--train-last-ratio", type=float, help="Fraction of transformer blocks to keep trainable from the top.")
+    parser.add_argument("--freeze-embedding", action="store_true", help="Freeze token embedding when using --freeze-for-ab.")
+    parser.add_argument("--train-time-embedding", action="store_true", help="Keep time embedding trainable when using --freeze-for-ab.")
+    parser.add_argument("--future-only-loss", action="store_true", help="Train and validate only on the future horizon positions.")
+    parser.add_argument("--disable-comet", action="store_true", help="Disable Comet logging.")
+    return parser.parse_args()
+
+
 if __name__ == '__main__':
     # Usage: torchrun --standalone --nproc_per_node=NUM_GPUS train_predictor.py
     if "WORLD_SIZE" not in os.environ:
         raise RuntimeError("This script must be launched with `torchrun`.")
 
-    config_instance = Config()
-    main(config_instance.__dict__)
+    args = parse_args()
+    config = Config().__dict__
+
+    if args.epochs is not None:
+        config['epochs'] = args.epochs
+    if args.batch_size is not None:
+        config['batch_size'] = args.batch_size
+    if args.num_workers is not None:
+        config['num_workers'] = args.num_workers
+    if args.predictor_learning_rate is not None:
+        config['predictor_learning_rate'] = args.predictor_learning_rate
+    if args.tokenizer_path:
+        config['predictor_tokenizer_path'] = args.tokenizer_path
+    if args.save_folder_name:
+        config['predictor_save_folder_name'] = args.save_folder_name
+    if args.use_pretrained_tokenizer:
+        config['skip_tokenizer_finetune'] = True
+    if args.freeze_for_ab:
+        config['freeze_predictor_for_ab'] = True
+    if args.train_last_ratio is not None:
+        config['predictor_train_last_ratio'] = args.train_last_ratio
+    if args.freeze_embedding:
+        config['freeze_embedding'] = True
+    if args.train_time_embedding:
+        config['train_time_embedding'] = True
+    if args.future_only_loss:
+        config['future_only_loss'] = True
+    if args.disable_comet:
+        config['use_comet'] = False
+
+    main(config)

@@ -1,6 +1,9 @@
+import json
 import pickle
 import random
+
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from config import Config
@@ -42,6 +45,8 @@ class QlibDataset(Dataset):
             self.data = pickle.load(f)
 
         self.window = self.config.lookback_window + self.config.predict_window + 1
+        self.metadata = self._load_metadata()
+        self.score_start, self.score_end = self._resolve_score_range()
 
         self.symbols = list(self.data.keys())
         self.feature_list = self.config.feature_list
@@ -63,16 +68,44 @@ class QlibDataset(Dataset):
                 df['day'] = df['datetime'].dt.day
                 df['month'] = df['datetime'].dt.month
                 # Keep only necessary columns to save memory.
-                self.data[symbol] = df[self.feature_list + self.time_feature_list]
+                self.data[symbol] = df[['datetime'] + self.feature_list + self.time_feature_list]
 
                 # Add all valid starting indices for this symbol to the global list.
                 for i in range(num_samples):
-                    self.indices.append((symbol, i))
+                    if self._sample_in_score_range(df, i):
+                        self.indices.append((symbol, i))
 
         # The effective dataset size is the minimum of the configured iterations
         # and the total number of available samples.
         self.n_samples = min(self.n_samples, len(self.indices))
         print(f"[{data_type.upper()}] Found {len(self.indices)} possible samples. Using {self.n_samples} per epoch.")
+
+    def _load_metadata(self) -> dict:
+        metadata_path = f"{self.config.dataset_path}/metadata.json"
+        try:
+            with open(metadata_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+
+    def _resolve_score_range(self):
+        split_meta = self.metadata.get('splits', {}).get(self.data_type, {})
+        score_start = split_meta.get('score_start')
+        score_end = split_meta.get('score_end')
+        if not score_start or not score_end:
+            return None, None
+        return pd.Timestamp(score_start), pd.Timestamp(score_end)
+
+    def _sample_in_score_range(self, df, start_idx: int) -> bool:
+        if self.score_start is None or self.score_end is None:
+            return True
+
+        target_end_idx = start_idx + self.config.lookback_window + self.config.predict_window - 1
+        if target_end_idx >= len(df):
+            return False
+
+        target_end_time = df.iloc[target_end_idx]['datetime']
+        return self.score_start <= target_end_time <= self.score_end
 
     def set_epoch_seed(self, epoch: int):
         """

@@ -1,3 +1,92 @@
+当前补充说明
+
+当前用于 `zlab/lab.md` A/B 实验的推荐链路是 `csv_data_preprocess.py -> train_predictor.py -> evaluate_ab.py`。运行入口是 `zlab/scripts/prepare_ab_data.sh`、`zlab/scripts/run_group_a.sh`、`zlab/scripts/run_group_b.sh`。日志会自动落盘：
+
+* A 组推理日志：`zlab/results/evaluations/h*/group_a/inference.log`
+* B 组训练日志：`zlab/results/models/h*/<save_folder>/train.log`
+* B 组推理日志：`zlab/results/evaluations/h*/group_b/inference.log`
+
+设备说明
+
+* A 组评估允许 `DEVICE=auto`，会优先尝试当前 `torch` 可用的 GPU。
+* B 组训练保持 `torchrun + CUDA` 路径，不做 CPU fallback。
+* 如果 `torch` 与服务器 CUDA/驱动不兼容，B 组训练应直接修复环境中的 `torch` 版本，而不是继续改训练逻辑。
+
+旧代码逻辑梳理
+
+旧版 `finetune` 的标准链路是 `qlib_data_preprocess.py -> train_tokenizer.py -> train_predictor.py -> qlib_test.py`。
+
+旧训练逻辑
+
+* `train_tokenizer.py`：训练 tokenizer / VQ-VAE，损失是 `recon_loss_pre + recon_loss_all` 与 `bsq_loss` 的组合，batch loss 为 `(recon_loss + bsq_loss) / 2`。
+* tokenizer 训练日志重点记录 `train_tokenizer_loss_batch`、`train_vqvae_vq_loss_each_batch`、`train_recon_loss_pre_each_batch`、`train_recon_loss_each_batch`，epoch 级只看 `val_tokenizer_loss_epoch`。
+* tokenizer checkpoint 选择标准只有一个：`Validation Loss` 最低。
+* `train_predictor.py`：先用 tokenizer 编码，再做自回归 next-token 预测，通过 `model.module.head.compute_loss(...)` 计算 token-level loss。
+* predictor 训练日志重点记录 `train_predictor_loss_batch`、`train_S1_loss_each_batch`、`train_S2_loss_each_batch`、`predictor_learning_rate`，epoch 级只看 `val_predictor_loss_epoch`。
+* predictor checkpoint 同样只按 `Validation Loss` 选择。
+
+旧测试逻辑
+
+* `qlib_test.py` 只加载 `test_data.pkl`。
+* 脚本在测试集上滚动推理，再从预测的 `close` 序列构造四种 signal：`last`、`mean`、`max`、`min`。
+* 这些 signal 会送入 `TopkDropoutStrategy`，再用 Qlib 回测。
+* 旧测试的主要输出是策略层结果：`Benchmark Return`、`Excess Return (w/o cost)`、`Excess Return (w/ cost)` 和累计收益曲线。
+* 旧 `qlib_test.py` 没有显式计算 `RankIC/IC/MAE/RMSE`，它更接近 demo 风格的“生成 signal -> 直接回测”。
+
+旧代码训练 / 测试分别用哪些指标
+
+* 旧训练：tokenizer 看重建类 loss 与 `bsq_loss`，predictor 看 token-level 自回归 loss，checkpoint 都按 validation loss 选。
+* 旧测试：看 Qlib 回测指标，重点是基准收益、超额收益、累计收益曲线。
+* 旧链路是典型的“训练看 loss，测试看回测”，没有统一的收益预测监督指标体系。
+
+当前修改到底改了什么
+
+当前对 `finetune` 的修改不只是为了接自己的数据，也不只是为了只微调 predictor 上层 block，至少有三类变化。
+
+1. 数据接入与切分口径
+
+* 新增 `csv_data_preprocess.py`，不再依赖 Qlib 原始数据目录。
+* 统一从本地日线 CSV 生成 `train/val/test_data.pkl`。
+* 除了换数据源，还补了 lookback buffer、`metadata.json` 和按 `target_end_time` 过滤验证样本的逻辑，目的是把 `val/test` 边界定义清楚。
+
+2. 训练协议
+
+* 当前 `train_predictor.py` 支持跳过 tokenizer 微调，直接使用预训练 tokenizer。
+* 支持只训练 predictor 后部 block 与 `norm/dep_layer/head`。
+* 支持 `future-only loss`。
+* 因此当前训练与旧代码“同属 token loss 家族”，但不完全相同。关闭 `future_only_loss` 时与旧 predictor 更接近；开启后则改成只对未来预测段算 loss。
+
+3. 评估目标与评估指标
+
+* 新增 `evaluate_ab.py` 的根本原因，不是单纯为了换数据，而是因为当前 A/B 实验要比较“未来收益预测 / 排序能力”。
+* 当前测试阶段的主要输出改成 `mean_rank_ic`、`rank_ic_ir`、`mean_ic`、`direction_accuracy`、`mae`、`rmse`、`topk_mean_return`、`long_short_topk_mean_return`、`topk_cum_return`、`long_short_topk_cum_return`。
+* 当前测试同时输出 `val` 和 `test`，这也不同于旧 `qlib_test.py` 只看 `test`。
+
+当前训练、测试指标和旧代码一致吗
+
+* 训练指标：不完全一致。相同点是当前训练仍然由 token-level loss 驱动，best checkpoint 仍按 validation loss 选择；不同点是当前 B 组默认跳过 tokenizer、支持 partial-freeze，且默认开启 `future_only_loss`。
+* 测试指标：不一致。旧测试是回测优先，当前 A/B 测试是收益预测指标优先，主看 `RankIC/IC`，回报类指标变成辅助的 top-k / long-short proxy。
+
+所以如果你的问题是：
+
+“当前改代码是不是仅仅为了适配自己的数据和上层 block 微调？”
+
+答案是：
+
+* 不是
+* 还包括把评估目标从“Qlib demo 式回测输出”切换成“面向 A/B 实验的统一收益预测评估”
+
+如果你的问题是：
+
+“当前训练、测试指标和旧代码一致吗？”
+
+答案是：
+
+* 训练：部分一致，部分不一致
+* 测试：不一致
+
+下面这段仍保留为“官方 Qlib 版说明”，仅作参考。
+
 ******官方提示******
 环境要求
 首先确保已安装 requirements.txt 中的所有依赖项

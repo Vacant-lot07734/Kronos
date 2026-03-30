@@ -51,6 +51,8 @@ Desktop.ini
 *.csv
 cache_data
 examples/output
+zlab/data
+zlab/results
 
 # Model files (large files)
 *.pth

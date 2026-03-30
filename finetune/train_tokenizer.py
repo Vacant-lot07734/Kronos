@@ -12,8 +12,6 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-import comet_ml
-
 # Ensure project root is in path
 sys.path.append("../")
 from config import Config
@@ -27,6 +25,29 @@ from utils.training_utils import (
     get_model_size,
     format_time,
 )
+
+
+def create_comet_logger(config: dict):
+    if not config.get('use_comet'):
+        return None
+
+    try:
+        from comet_ml import Experiment
+    except ImportError as exc:
+        raise ImportError(
+            "comet_ml is not installed, but use_comet=True. "
+            "Install comet_ml or set use_comet=False."
+        ) from exc
+
+    logger = Experiment(
+        api_key=config['comet_config']['api_key'],
+        project_name=config['comet_config']['project_name'],
+        workspace=config['comet_config']['workspace'],
+    )
+    logger.add_tag(config['comet_tag'])
+    logger.set_name(config['comet_name'])
+    logger.log_parameters(config)
+    return logger
 
 
 def create_dataloaders(config: dict, rank: int, world_size: int):
@@ -235,14 +256,7 @@ def main(config: dict):
             'world_size': world_size,
         }
         if config['use_comet']:
-            comet_logger = comet_ml.Experiment(
-                api_key=config['comet_config']['api_key'],
-                project_name=config['comet_config']['project_name'],
-                workspace=config['comet_config']['workspace'],
-            )
-            comet_logger.add_tag(config['comet_tag'])
-            comet_logger.set_name(config['comet_name'])
-            comet_logger.log_parameters(config)
+            comet_logger = create_comet_logger(config)
             print("Comet Logger Initialized.")
 
     dist.barrier()  # Ensure save directory is created before proceeding
