@@ -14,6 +14,16 @@ TORCHRUN_BIN="${TORCHRUN_BIN:-$HOME/miniconda3/envs/kronos/bin/torchrun}"
 DEVICE="${DEVICE:-cuda:0}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
 RESULT_NAME="${RESULT_NAME:-group_b}"
+EVAL_ONLY="${KRONOS_EVAL_ONLY:-false}"
+
+case "${EVAL_ONLY,,}" in
+  true|false)
+    ;;
+  *)
+    echo "KRONOS_EVAL_ONLY must be true or false, got: $EVAL_ONLY" >&2
+    exit 1
+    ;;
+esac
 
 export KRONOS_PREDICT_WINDOW="$HORIZON"
 export KRONOS_DATASET_PATH="${KRONOS_DATASET_PATH_BASE:-$ROOT/zlab/results/processed_datasets}/h${HORIZON}"
@@ -26,36 +36,51 @@ EVAL_RUN_DIR="${RESULT_SAVE_PATH}/${RESULT_NAME}"
 TRAIN_LOG_PATH="${MODEL_RUN_DIR}/train.log"
 INFER_LOG_PATH="${EVAL_RUN_DIR}/inference.log"
 TENSORBOARD_LOG_DIR="${MODEL_RUN_DIR}/${KRONOS_TENSORBOARD_SUBDIR:-tensorboard}"
+MODEL_SOURCE_HORIZON="${KRONOS_EVAL_MODEL_HORIZON:-$HORIZON}"
+if [[ "${EVAL_ONLY,,}" == "true" && -z "${KRONOS_EVAL_MODEL_HORIZON:-}" && "$HORIZON" != "1" ]]; then
+  MODEL_SOURCE_HORIZON="1"
+fi
+MODEL_SOURCE_ROOT="${KRONOS_SAVE_PATH_BASE:-$ROOT/zlab/results/models}/h${MODEL_SOURCE_HORIZON}"
+MODEL_PATH="${MODEL_SOURCE_ROOT}/${KRONOS_PREDICTOR_SAVE_FOLDER_NAME}/checkpoints/best_model"
 
 mkdir -p "$KRONOS_SAVE_PATH" "$RESULT_SAVE_PATH" "$MODEL_RUN_DIR" "$EVAL_RUN_DIR"
 
-{
-  echo "Running Group B training, H=${HORIZON}"
-  echo "Dataset path: $KRONOS_DATASET_PATH"
-  echo "Model save root: $KRONOS_SAVE_PATH"
-  echo "Requested device: $DEVICE"
-  echo "Training log: $TRAIN_LOG_PATH"
-  echo "TensorBoard log dir: $TENSORBOARD_LOG_DIR"
+if [[ "${EVAL_ONLY,,}" != "true" ]]; then
+  {
+    echo "Running Group B training, H=${HORIZON}"
+    echo "Eval only: $EVAL_ONLY"
+    echo "Dataset path: $KRONOS_DATASET_PATH"
+    echo "Model save root: $KRONOS_SAVE_PATH"
+    echo "Requested device: $DEVICE"
+    echo "Training log: $TRAIN_LOG_PATH"
+    echo "TensorBoard log dir: $TENSORBOARD_LOG_DIR"
 
-  PYTHONPATH="$ROOT" "$TORCHRUN_BIN" --standalone --nproc_per_node="$NPROC_PER_NODE" \
-    "$ROOT/finetune/train_predictor.py" \
-    --use-pretrained-tokenizer \
-    --freeze-for-ab \
-    --train-last-ratio "${KRONOS_PREDICTOR_TRAIN_LAST_RATIO:-0.333333}" \
-    --freeze-embedding \
-    --future-only-loss \
-    --epochs "${KRONOS_EPOCHS:-10}" \
-    --batch-size "${KRONOS_BATCH_SIZE:-32}" \
-    --num-workers "${KRONOS_NUM_WORKERS:-2}" \
-    --predictor-learning-rate "${KRONOS_PREDICTOR_LR:-5e-5}" \
-    --save-folder-name "${KRONOS_PREDICTOR_SAVE_FOLDER_NAME}" \
-    --disable-comet
-} 2>&1 | tee "$TRAIN_LOG_PATH"
-
-MODEL_PATH="${KRONOS_SAVE_PATH}/${KRONOS_PREDICTOR_SAVE_FOLDER_NAME}/checkpoints/best_model"
+    PYTHONPATH="$ROOT" "$TORCHRUN_BIN" --standalone --nproc_per_node="$NPROC_PER_NODE" \
+      "$ROOT/finetune/train_predictor.py" \
+      --use-pretrained-tokenizer \
+      --freeze-for-ab \
+      --train-last-ratio "${KRONOS_PREDICTOR_TRAIN_LAST_RATIO:-0.333333}" \
+      --freeze-embedding \
+      --future-only-loss \
+      --epochs "${KRONOS_EPOCHS:-10}" \
+      --batch-size "${KRONOS_BATCH_SIZE:-32}" \
+      --num-workers "${KRONOS_NUM_WORKERS:-2}" \
+      --predictor-learning-rate "${KRONOS_PREDICTOR_LR:-5e-5}" \
+      --save-folder-name "${KRONOS_PREDICTOR_SAVE_FOLDER_NAME}" \
+      --disable-comet
+  } 2>&1 | tee "$TRAIN_LOG_PATH"
+else
+  if [[ ! -d "$MODEL_PATH" ]]; then
+    echo "KRONOS_EVAL_ONLY=true, but model checkpoint does not exist: $MODEL_PATH" >&2
+    echo "Set KRONOS_EVAL_MODEL_HORIZON or KRONOS_PREDICTOR_SAVE_FOLDER_NAME if you want to reuse a different trained model." >&2
+    exit 1
+  fi
+fi
 
 {
   echo "Running Group B evaluation, H=${HORIZON}"
+  echo "Eval only: $EVAL_ONLY"
+  echo "Model source horizon: $MODEL_SOURCE_HORIZON"
   echo "Model path: $MODEL_PATH"
   echo "Result path: $EVAL_RUN_DIR"
   echo "Inference log: $INFER_LOG_PATH"

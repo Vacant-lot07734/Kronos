@@ -5,6 +5,9 @@
 * A 组推理日志：`zlab/results/evaluations/h*/group_a/inference.log`
 * B 组训练日志：`zlab/results/models/h*/<save_folder>/train.log`
 * B 组推理日志：`zlab/results/evaluations/h*/group_b/inference.log`
+* `zlab/scripts/run_group_b.sh` 默认执行训练+评估；设置 `KRONOS_EVAL_ONLY=true` 时只做评估，不重新训练
+* 当 `KRONOS_EVAL_ONLY=true` 且当前 `H != 1` 时，脚本默认复用 `h1/<save_folder>/checkpoints/best_model` 作为已训练模型；如需改成其他来源，可显式设置 `KRONOS_EVAL_MODEL_HORIZON`
+* `zlab/ab_env.sh` 每次 `source` 时会先清理常用实验覆盖变量，例如 `KRONOS_PREDICTOR_LR`、`KRONOS_BATCH_SIZE`、`KRONOS_EPOCHS`、`KRONOS_PREDICTOR_SAVE_FOLDER_NAME`、`RESULT_NAME`、`KRONOS_EVAL_ONLY`，避免旧 shell 状态串到下一次实验
 * `train_predictor.py` / `train_tokenizer.py` 已改为 Comet 懒加载；关闭 Comet 时，不再要求环境里安装 `comet_ml`
 * TensorBoard 本地日志默认写到 `zlab/results/models/h*/<save_folder>/tensorboard`
 * 如果环境里未安装 `tensorboard` 包，训练不会中断，只会打印 warning 并跳过 TensorBoard
