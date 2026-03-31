@@ -102,6 +102,7 @@ class Config:
         self.tokenizer_learning_rate = _get_env_float("KRONOS_TOKENIZER_LR", 2e-4)
         self.predictor_learning_rate = _get_env_float("KRONOS_PREDICTOR_LR", 4e-5)
         self.future_only_loss = _get_env_bool("KRONOS_FUTURE_ONLY_LOSS", False)
+        self.normalize_with_context_only = _get_env_bool("KRONOS_NORMALIZE_WITH_CONTEXT_ONLY", False)
 
         # Gradient accumulation to simulate a larger batch size.
         self.accumulation_steps = _get_env_int("KRONOS_ACCUMULATION_STEPS", 1)

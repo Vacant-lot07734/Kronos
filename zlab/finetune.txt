@@ -9,6 +9,7 @@
 * TensorBoard 本地日志默认写到 `zlab/results/models/h*/<save_folder>/tensorboard`
 * 如果环境里未安装 `tensorboard` 包，训练不会中断，只会打印 warning 并跳过 TensorBoard
 * 查看 TensorBoard 的典型命令：`tensorboard --logdir zlab/results/models`
+* A/B 环境默认开启 `KRONOS_NORMALIZE_WITH_CONTEXT_ONLY=true`：训练集窗口的归一化统计量只用历史 `lookback` 段计算，以与推理阶段的 context-only 归一化保持一致
 
 设备说明
 
@@ -58,6 +59,7 @@
 * 当前 `train_predictor.py` 支持跳过 tokenizer 微调，直接使用预训练 tokenizer。
 * 支持只训练 predictor 后部 block 与 `norm/dep_layer/head`。
 * 支持 `future-only loss`。
+* A/B 环境下支持 `context-only normalization`，避免训练阶段把未来窗口一起用于标准化统计。
 * 因此当前训练与旧代码“同属 token loss 家族”，但不完全相同。关闭 `future_only_loss` 时与旧 predictor 更接近；开启后则改成只对未来预测段算 loss。
 
 3. 评估目标与评估指标

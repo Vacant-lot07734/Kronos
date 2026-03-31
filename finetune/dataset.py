@@ -151,8 +151,14 @@ class QlibDataset(Dataset):
         x = win_df[self.feature_list].values.astype(np.float32)
         x_stamp = win_df[self.time_feature_list].values.astype(np.float32)
 
-        # Perform instance-level normalization.
-        x_mean, x_std = np.mean(x, axis=0), np.std(x, axis=0)
+        # Match inference-time scaling for A/B experiments by using only the
+        # historical lookback slice to estimate normalization statistics.
+        if self.config.normalize_with_context_only:
+            norm_source = x[:self.config.lookback_window]
+        else:
+            norm_source = x
+
+        x_mean, x_std = np.mean(norm_source, axis=0), np.std(norm_source, axis=0)
         x = (x - x_mean) / (x_std + 1e-5)
         x = np.clip(x, -self.config.clip, self.config.clip)
 
