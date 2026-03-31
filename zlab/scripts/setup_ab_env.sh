@@ -29,6 +29,14 @@ Then prepare your local config file if needed:
 If torch reports cuda_available=False or your torch CUDA version is newer than the server driver supports,
 keep DEVICE=auto (recommended) or set DEVICE=cpu in zlab/ab_env.sh.
 
+If you want TensorBoard dashboards for local training analysis, install it yourself in the active env:
+
+  python -m pip install tensorboard
+
+Then view logs with a command like:
+
+  tensorboard --logdir "$ROOT/zlab/results/models"
+
 Finally run:
 
   zlab/scripts/check_ab_setup.sh

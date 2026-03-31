@@ -47,6 +47,8 @@ for mod in mods:
         missing.append(mod)
 if missing:
     raise SystemExit(1)
+tb_ok = importlib.util.find_spec("tensorboard") is not None
+print(f"tensorboard: {'OK' if tb_ok else 'OPTIONAL_MISSING'}")
 PY
 
 echo

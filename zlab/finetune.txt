@@ -5,6 +5,10 @@
 * A 组推理日志：`zlab/results/evaluations/h*/group_a/inference.log`
 * B 组训练日志：`zlab/results/models/h*/<save_folder>/train.log`
 * B 组推理日志：`zlab/results/evaluations/h*/group_b/inference.log`
+* `train_predictor.py` / `train_tokenizer.py` 已改为 Comet 懒加载；关闭 Comet 时，不再要求环境里安装 `comet_ml`
+* TensorBoard 本地日志默认写到 `zlab/results/models/h*/<save_folder>/tensorboard`
+* 如果环境里未安装 `tensorboard` 包，训练不会中断，只会打印 warning 并跳过 TensorBoard
+* 查看 TensorBoard 的典型命令：`tensorboard --logdir zlab/results/models`
 
 设备说明
 

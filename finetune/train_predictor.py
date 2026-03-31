@@ -23,29 +23,7 @@ from utils.training_utils import (
     get_model_size,
     format_time
 )
-
-
-def create_comet_logger(config: dict):
-    if not config.get('use_comet'):
-        return None
-
-    try:
-        from comet_ml import Experiment
-    except ImportError as exc:
-        raise ImportError(
-            "comet_ml is not installed, but use_comet=True. "
-            "Install comet_ml or run train_predictor.py with --disable-comet."
-        ) from exc
-
-    logger = Experiment(
-        api_key=config['comet_config']['api_key'],
-        project_name=config['comet_config']['project_name'],
-        workspace=config['comet_config']['workspace'],
-    )
-    logger.add_tag(config['comet_tag'])
-    logger.set_name(config['comet_name'])
-    logger.log_parameters(config)
-    return logger
+from utils.experiment_logger import build_experiment_logger
 
 
 def resolve_predictor_tokenizer_path(config: dict) -> str:
@@ -210,7 +188,7 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
             # Backward pass and optimization
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
             optimizer.step()
             scheduler.step()
 
@@ -223,10 +201,11 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
                 )
             if rank == 0 and logger:
                 lr = optimizer.param_groups[0]['lr']
-                logger.log_metric('train_predictor_loss_batch', loss.item(), step=batch_idx_global)
-                logger.log_metric('train_S1_loss_each_batch', s1_loss.item(), step=batch_idx_global)
-                logger.log_metric('train_S2_loss_each_batch', s2_loss.item(), step=batch_idx_global)
-                logger.log_metric('predictor_learning_rate', lr, step=batch_idx_global)
+                logger.log_metric('train_predictor_loss_batch', loss.item(), step=batch_idx_global, tb_tag='predictor/train/loss')
+                logger.log_metric('train_S1_loss_each_batch', s1_loss.item(), step=batch_idx_global, tb_tag='predictor/train/stream1_loss')
+                logger.log_metric('train_S2_loss_each_batch', s2_loss.item(), step=batch_idx_global, tb_tag='predictor/train/stream2_loss')
+                logger.log_metric('predictor_learning_rate', lr, step=batch_idx_global, tb_tag='predictor/train/learning_rate')
+                logger.log_metric('predictor_grad_norm_batch', grad_norm, step=batch_idx_global, tb_tag='predictor/train/grad_norm')
 
             batch_idx_global += 1
 
@@ -264,13 +243,16 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
             print(f"Time This Epoch: {format_time(time.time() - epoch_start_time)}")
             print(f"Total Time Elapsed: {format_time(time.time() - start_time)}\n")
             if logger:
-                logger.log_metric('val_predictor_loss_epoch', avg_val_loss, epoch=epoch_idx)
+                logger.log_metric('val_predictor_loss_epoch', avg_val_loss, epoch=epoch_idx, tb_tag='predictor/val/loss')
+                logger.log_metric('predictor_epoch_time_seconds', time.time() - epoch_start_time, epoch=epoch_idx, tb_tag='predictor/train/epoch_time_seconds')
 
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 save_path = f"{save_dir}/checkpoints/best_model"
                 model.module.save_pretrained(save_path)
                 print(f"Best model saved to {save_path} (Val Loss: {best_val_loss:.4f})")
+                if logger:
+                    logger.log_model("best_model", save_path)
 
         dist.barrier()
 
@@ -295,9 +277,12 @@ def main(config: dict):
             'save_directory': save_dir,
             'world_size': world_size,
         }
-        if config['use_comet']:
-            comet_logger = create_comet_logger(config)
+        comet_logger = build_experiment_logger(config, save_dir)
+        master_summary['tensorboard_log_dir'] = getattr(comet_logger, 'tensorboard_log_dir', None)
+        if getattr(comet_logger, 'has_comet', False):
             print("Comet Logger Initialized.")
+        if getattr(comet_logger, 'has_tensorboard', False):
+            print(f"TensorBoard log dir: {comet_logger.tensorboard_log_dir}")
 
     dist.barrier()
 
@@ -314,6 +299,17 @@ def main(config: dict):
     if rank == 0:
         print(f"Predictor tokenizer path: {tokenizer_path}")
         print(f"Predictor Model Size: {get_model_size(model.module)}")
+        trainable_params = sum(p.numel() for p in model.module.parameters() if p.requires_grad)
+        print(f"Trainable Parameters: {trainable_params}")
+        if comet_logger:
+            logger_text = json.dumps({
+                'predictor_tokenizer_path': tokenizer_path,
+                'predictor_model_size': get_model_size(model.module),
+                'predictor_trainable_parameters': trainable_params,
+                'loss_mode': 'future-only' if config.get('future_only_loss', False) else 'full-sequence',
+            }, indent=2)
+            comet_logger.log_text('predictor/run_summary', f"```json\n{logger_text}\n```", step=0)
+            comet_logger.log_metric('predictor_trainable_parameters', trainable_params, step=0, tb_tag='predictor/model/trainable_parameters')
 
     # Start Training
     dt_result = train_model(
@@ -325,7 +321,9 @@ def main(config: dict):
         with open(os.path.join(save_dir, 'summary.json'), 'w') as f:
             json.dump(master_summary, f, indent=4)
         print('Training finished. Summary file saved.')
-        if comet_logger: comet_logger.end()
+        if comet_logger:
+            comet_logger.log_metric('predictor_best_val_loss', dt_result['best_val_loss'], step=0, tb_tag='predictor/val/best_loss')
+            comet_logger.close()
 
     cleanup_ddp()
 
@@ -345,6 +343,7 @@ def parse_args():
     parser.add_argument("--train-time-embedding", action="store_true", help="Keep time embedding trainable when using --freeze-for-ab.")
     parser.add_argument("--future-only-loss", action="store_true", help="Train and validate only on the future horizon positions.")
     parser.add_argument("--disable-comet", action="store_true", help="Disable Comet logging.")
+    parser.add_argument("--disable-tensorboard", action="store_true", help="Disable TensorBoard logging.")
     return parser.parse_args()
 
 
@@ -382,5 +381,7 @@ if __name__ == '__main__':
         config['future_only_loss'] = True
     if args.disable_comet:
         config['use_comet'] = False
+    if args.disable_tensorboard:
+        config['use_tensorboard'] = False
 
     main(config)

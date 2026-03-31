@@ -25,6 +25,7 @@ MODEL_RUN_DIR="${KRONOS_SAVE_PATH}/${KRONOS_PREDICTOR_SAVE_FOLDER_NAME}"
 EVAL_RUN_DIR="${RESULT_SAVE_PATH}/${RESULT_NAME}"
 TRAIN_LOG_PATH="${MODEL_RUN_DIR}/train.log"
 INFER_LOG_PATH="${EVAL_RUN_DIR}/inference.log"
+TENSORBOARD_LOG_DIR="${MODEL_RUN_DIR}/${KRONOS_TENSORBOARD_SUBDIR:-tensorboard}"
 
 mkdir -p "$KRONOS_SAVE_PATH" "$RESULT_SAVE_PATH" "$MODEL_RUN_DIR" "$EVAL_RUN_DIR"
 
@@ -34,6 +35,7 @@ mkdir -p "$KRONOS_SAVE_PATH" "$RESULT_SAVE_PATH" "$MODEL_RUN_DIR" "$EVAL_RUN_DIR
   echo "Model save root: $KRONOS_SAVE_PATH"
   echo "Requested device: $DEVICE"
   echo "Training log: $TRAIN_LOG_PATH"
+  echo "TensorBoard log dir: $TENSORBOARD_LOG_DIR"
 
   PYTHONPATH="$ROOT" "$TORCHRUN_BIN" --standalone --nproc_per_node="$NPROC_PER_NODE" \
     "$ROOT/finetune/train_predictor.py" \

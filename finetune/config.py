@@ -118,6 +118,9 @@ class Config:
         # Experiment Logging & Saving
         # =================================================================
         self.use_comet = _get_env_bool("KRONOS_USE_COMET", True) # Set to False if you don't want to use Comet ML
+        self.use_tensorboard = _get_env_bool("KRONOS_USE_TENSORBOARD", True)
+        self.tensorboard_subdir = _get_env_str("KRONOS_TENSORBOARD_SUBDIR", "tensorboard")
+        self.tensorboard_flush_secs = _get_env_int("KRONOS_TENSORBOARD_FLUSH_SECS", 10)
         self.comet_config = {
             # It is highly recommended to load secrets from environment variables
             # for security purposes. Example: os.getenv("COMET_API_KEY")
