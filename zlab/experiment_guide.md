@@ -12,7 +12,8 @@
 
 说明：
 
-* B/C 当前都按 `val loss` 选 `best_model`
+* B/C 当前都保留两类 checkpoint：`best_model_by_loss` 与 `best_model_by_rankic`
+* `checkpoints/best_model` 继续保留，并与 `best_model_by_loss` 对齐，兼容旧路径
 * A/B/C 的最终对比仍以 `RankIC / IC / long-short` 为主
 * C 组保持独立的数据入口和评估入口，不与 B 组预处理脚本合并
 
@@ -38,6 +39,12 @@ source zlab/ab_env.sh
 
 每次重新 `source zlab/ab_env.sh`，都会先清理常用 override，避免旧 shell 状态污染下一次实验。
 
+当前 runner 的默认行为：
+
+* A 组结果目录自动追加 `pred_len / sample_count / sampling` 后缀
+* B/C 模型目录自动追加主要训练参数后缀
+* B/C 训练结束后，会分别对 `best_model_by_loss` 与 `best_model_by_rankic` 跑一次推理，便于直接对比
+
 ## 3. 关键参数
 
 ### 通用参数
@@ -54,6 +61,10 @@ source zlab/ab_env.sh
   predictor 可训练部分学习率
 * `KRONOS_EVAL_ONLY`
   `true` 时跳过训练，只做评估
+* `KRONOS_PREDICTOR_SAVE_FOLDER_NAME`
+  模型目录名前缀；runner 会自动追加参数后缀
+* `RESULT_NAME`
+  评估目录名前缀；runner 会自动追加参数后缀与 checkpoint 标记
 
 ### B 组相关
 
@@ -153,7 +164,7 @@ zlab/scripts/run_group_c.sh 5
 ```bash
 source zlab/ab_env.sh
 export KRONOS_EVAL_ONLY="true"
-export KRONOS_PREDICTOR_SAVE_FOLDER_NAME="group_c_predictor_h1"
+export KRONOS_PREDICTOR_SAVE_FOLDER_NAME="group_c_predictor"
 export RESULT_NAME="group_c_h1_eval2"
 zlab/scripts/run_group_c.sh 1
 ```
@@ -162,14 +173,21 @@ zlab/scripts/run_group_c.sh 1
 
 ### 当前实现下的训练判断
 
-当前 B/C 训练脚本的 checkpoint 选择标准都是：
+当前 B/C 训练脚本会同时维护两类 checkpoint：
 
-* `val loss`
+* `best_model_by_loss`
+* `best_model_by_rankic`
+
+其中：
+
+* `val loss` 用于保存 `best_model_by_loss`
+* `val mean_rank_ic` 用于保存 `best_model_by_rankic`
 
 所以训练阶段首先看：
 
 * `train loss`
 * `val loss`
+* `val mean_rank_ic`
 * TensorBoard 里的 `s1_loss / s2_loss / grad_norm / lr`
 
 一般判断：
@@ -247,15 +265,15 @@ zlab/scripts/run_group_c.sh 1
 
 当前 B/C 的更准确表述是：
 
-* “在相同 `val loss` 选模协议下，比较下游金融指标差异”
+* “在统一训练目标下，同时比较 `loss` 选模路径与 `RankIC` 选模路径的下游金融指标差异”
 
 而不是：
 
-* “比较各自最优金融指标 checkpoint 的最好结果”
+* “只看单一 checkpoint 就代表最终实验结论”
 
 如果后续要升级为正式实验口径，再做两件事：
 
-1. 用 `val mean RankIC` 选模
+1. 明确最终报告使用 `best_model_by_rankic` 还是同时报告两条选模路径
 2. 保证 B/C 在完全相同股票池上比较
 
 ## 9. 常见问题

@@ -8,9 +8,56 @@ predictor hidden states.
 import sys
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 sys.path.append("../")
-from model.module import RMSNorm, MultiHeadCrossAttentionWithRoPE
+from model.module import RMSNorm
+
+
+class MultiHeadCrossAttention(nn.Module):
+    """Plain cross-attention for heterogeneous daily/hourly sequence lengths.
+
+    C-group fusion queries daily hidden states with hourly hidden states as
+    memory. The two streams naturally have different sequence lengths, so the
+    fusion layer should not reuse the predictor's RoPE-based attention, whose
+    current implementation assumes ``q_len == k_len``.
+    """
+
+    def __init__(self, d_model, n_heads, attn_dropout_p=0.0, resid_dropout_p=0.0):
+        super().__init__()
+        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+        self.attn_dropout_p = attn_dropout_p
+        self.resid_dropout = nn.Dropout(resid_dropout_p)
+
+    def forward(self, query, key, value, key_padding_mask=None):
+        batch_size, q_len, _ = query.shape
+        _, k_len, _ = key.shape
+
+        q = self.q_proj(query).view(batch_size, q_len, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(key).view(batch_size, k_len, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(value).view(batch_size, k_len, self.n_heads, self.head_dim).transpose(1, 2)
+
+        if key_padding_mask is not None:
+            attn_mask = key_padding_mask.unsqueeze(1).unsqueeze(2).expand(-1, self.n_heads, q_len, -1)
+        else:
+            attn_mask = None
+
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_mask,
+            dropout_p=self.attn_dropout_p if self.training else 0.0,
+            is_causal=False,
+        )
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, q_len, self.d_model)
+        return self.resid_dropout(self.out_proj(attn_output))
 
 
 class HourlyFusionLayer(nn.Module):
@@ -35,7 +82,7 @@ class HourlyFusionLayer(nn.Module):
         super().__init__()
         self.norm_q = RMSNorm(d_model)
         self.norm_kv = RMSNorm(d_model)
-        self.cross_attn = MultiHeadCrossAttentionWithRoPE(
+        self.cross_attn = MultiHeadCrossAttention(
             d_model, n_heads, attn_dropout_p, resid_dropout_p
         )
 

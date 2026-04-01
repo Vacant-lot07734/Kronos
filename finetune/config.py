@@ -173,6 +173,8 @@ class Config:
         self.inference_top_p = _get_env_float("KRONOS_INFERENCE_TOP_P", 0.9)
         self.inference_top_k = _get_env_int("KRONOS_INFERENCE_TOP_K", 0)
         self.inference_sample_count = _get_env_int("KRONOS_INFERENCE_SAMPLE_COUNT", 5)
+        self.eval_batch_size = _get_env_int("KRONOS_EVAL_BATCH_SIZE", 128)
+        self.eval_topk = _get_env_int("KRONOS_EVAL_TOPK", 10)
         self.backtest_batch_size = _get_env_int("KRONOS_BACKTEST_BATCH_SIZE", 1000)
         self.backtest_benchmark = self._set_benchmark(self.instrument)
 

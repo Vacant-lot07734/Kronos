@@ -99,7 +99,14 @@
 * pre-norm
 * daily hidden 作为 query
 * hourly hidden 作为 key/value
+* fusion 内部使用普通 cross-attention，不复用主干的 RoPE attention
 * residual 输出
+
+原因：
+
+* 日线 query 长度与小时线 memory 长度天然不同
+* 主干里带 RoPE 的 cross-attention 当前实现要求 `q_len == k_len`
+* 在 C 组 fusion 里去掉 RoPE 更符合“异构序列条件注入”的语义，也避免长度不一致时报 shape 错误
 
 ### `kronos_with_hourly.py`
 
@@ -129,9 +136,10 @@
 * predictor 后 `1/3` 训练
 * `hourly_encoder / fusion` 训练
 * 主损失仍为 `future-only token CE`
-* checkpoint 仍按 `val loss` 保存
+* 每个 epoch 同时计算 `val loss` 与 `val mean_rank_ic`
+* 同时保存 `best_model_by_loss` 与 `best_model_by_rankic`
 
-当前仍然与 B 组保持同一选模协议，不单独切到 `RankIC` 选模。
+当前仍然与 B 组保持同一训练协议，但已经额外保留 `RankIC` 选模路径，便于直接对比两种 checkpoint。
 
 ## 6. 评估逻辑
 
@@ -151,13 +159,15 @@
 * `dataset_c.py` 不再错误使用 `pd.os.environ`，改为 `os.getenv(...)`
 * `dataset.py` 和 `dataset_c.py` 的验证集采样改为按 `idx` 取样，避免验证阶段随机抽样导致的不稳定
 * `train_predictor_c.py` 中原来失效的 `setdefault(...)` 默认配置逻辑已改正，只有在环境变量未显式设置时才回落到 C 组默认值
+* `hourly_fusion.py` 不再复用带 RoPE 的 cross-attention，改为普通 cross-attention，修复 `q_len != k_len` 时的 shape mismatch
+* `train_predictor_c.py` 现在会同时按 `val loss` 与 `val mean_rank_ic` 保存两套 checkpoint
 
 ## 8. 当前实现约束
 
 这些不是代码 bug，但属于当前实现边界：
 
 * C 组股票池可能因为小时线覆盖不足而缩小
-* 当前 B/C 都按 `val loss` 选模，最终比较再看 `RankIC / IC / long-short`
+* 当前 B/C 的训练目标仍是 token CE，而不是直接优化金融指标
 * C 组不仅引入了小时线信息，也引入了额外参数容量，因此结构提升不能自动解释成“纯由小时线信息带来的增益”
 
 ## 9. 后续实现方向

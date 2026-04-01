@@ -72,12 +72,12 @@ export KRONOS_EVAL_RESULT_PATH_BASE="$KRONOS_RESULTS_ROOT/evaluations"
 # Optional overrides for group B
 # Uncomment only when needed. These values are reset on each `source`.
 # -------------------------------------------------------------------
-# export KRONOS_EVAL_ONLY="true"  # true: skip training and only run evaluation
+# export KRONOS_EVAL_ONLY="false"  # true: skip training and only run evaluation
 # export KRONOS_PREDICTOR_LR="2e-5"  # predictor learning rate
 # export KRONOS_BATCH_SIZE="32"  # per-GPU batch size
 # export KRONOS_EPOCHS="10"  # total training epochs
-# export KRONOS_PREDICTOR_SAVE_FOLDER_NAME="group_b_predictor_lr2e5_e10_bs32"  # model output subdir
-# export RESULT_NAME="group_b_lr2e5_e10_bs32"  # evaluation output subdir
+# export KRONOS_PREDICTOR_SAVE_FOLDER_NAME="group_b_predictor"  # model dir prefix; runner appends parameter suffix
+# export RESULT_NAME="group_b"  # evaluation dir prefix; runner appends parameter suffix and checkpoint marker
 
 # -------------------------------------------------------------------
 # Optional overrides for group C
@@ -90,5 +90,5 @@ export KRONOS_EVAL_RESULT_PATH_BASE="$KRONOS_RESULTS_ROOT/evaluations"
 # export KRONOS_PREDICTOR_LR="5e-5"  # learning rate for the trainable Kronos upper layers
 # export KRONOS_BATCH_SIZE="32"  # per-GPU batch size
 # export KRONOS_EPOCHS="15"  # C often needs a different epoch count than B
-# export KRONOS_PREDICTOR_SAVE_FOLDER_NAME="group_c_predictor_h1"  # model output subdir
-# export RESULT_NAME="group_c_h1"  # evaluation output subdir
+# export KRONOS_PREDICTOR_SAVE_FOLDER_NAME="group_c_predictor"  # model dir prefix; runner appends parameter suffix
+# export RESULT_NAME="group_c"  # evaluation dir prefix; runner appends parameter suffix and checkpoint marker

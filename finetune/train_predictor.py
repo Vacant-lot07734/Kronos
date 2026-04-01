@@ -4,6 +4,7 @@ import json
 import time
 import argparse
 from time import gmtime, strftime
+import numpy as np
 import torch.distributed as dist
 import torch
 from torch.utils.data import DataLoader
@@ -14,7 +15,15 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 sys.path.append('../')
 from config import Config
 from dataset import QlibDataset
-from model.kronos import KronosTokenizer, Kronos
+from model.kronos import KronosTokenizer, Kronos, KronosPredictor
+from evaluate_ab import (
+    _load_metadata as load_eval_metadata,
+    _load_split_data as load_eval_split_data,
+    _build_eval_windows as build_eval_windows,
+    _run_inference as run_eval_inference,
+    _build_daily_metrics as build_daily_metrics,
+    _compute_summary as compute_eval_summary,
+)
 # Import shared utilities
 from utils.training_utils import (
     setup_ddp,
@@ -129,7 +138,62 @@ def create_dataloaders(config: dict, rank: int, world_size: int):
     return train_loader, val_loader, train_dataset, valid_dataset
 
 
-def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_size):
+def build_val_rankic_context(config: dict) -> dict:
+    metadata = load_eval_metadata(config['dataset_path'])
+    split_data = load_eval_split_data(config['dataset_path'], 'val')
+    split_meta = metadata['splits']['val']
+    windows = build_eval_windows(
+        split_data,
+        split_meta,
+        config['lookback_window'],
+        config['predict_window'],
+    )
+    if not windows:
+        raise RuntimeError("No validation windows available for RankIC evaluation.")
+    return {"windows": windows}
+
+
+def evaluate_val_rankic(model: Kronos, tokenizer: KronosTokenizer, device, config: dict, eval_context: dict) -> dict:
+    predictor = KronosPredictor(
+        model=model,
+        tokenizer=tokenizer,
+        device=str(device),
+        max_context=config['max_context'],
+        clip=config['clip'],
+    )
+    predictions = run_eval_inference(
+        predictor=predictor,
+        windows=eval_context['windows'],
+        pred_len=config['predict_window'],
+        batch_size=config.get('eval_batch_size', 128),
+        sample_count=config.get('inference_sample_count', 5),
+        temperature=config.get('inference_T', 0.6),
+        top_k=config.get('inference_top_k', 0),
+        top_p=config.get('inference_top_p', 0.9),
+    )
+    daily_df = build_daily_metrics(predictions, topk=config.get('eval_topk', 10))
+    return compute_eval_summary(predictions, daily_df, topk=config.get('eval_topk', 10))
+
+
+def _metric_is_valid(value) -> bool:
+    return value is not None and np.isfinite(value)
+
+
+def save_loss_checkpoint(model, save_dir: str):
+    save_paths = [
+        f"{save_dir}/checkpoints/best_model",
+        f"{save_dir}/checkpoints/best_model_by_loss",
+    ]
+    for save_path in save_paths:
+        model.module.save_pretrained(save_path)
+
+
+def save_rankic_checkpoint(model, save_dir: str):
+    save_path = f"{save_dir}/checkpoints/best_model_by_rankic"
+    model.module.save_pretrained(save_path)
+
+
+def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_size, val_rankic_context=None):
     """
     The main training and validation loop for the predictor.
     """
@@ -158,6 +222,9 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
     )
 
     best_val_loss = float('inf')
+    best_val_loss_epoch = None
+    best_val_rank_ic = float('-inf')
+    best_val_rank_ic_epoch = None
     dt_result = {}
     batch_idx_global = 0
 
@@ -237,26 +304,59 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
         avg_val_loss = val_loss_sum_tensor.item() / val_batches_tensor.item() if val_batches_tensor.item() > 0 else 0
 
         # --- End of Epoch Summary & Checkpointing (Master Process Only) ---
+        val_rankic_summary = None
+        val_mean_rank_ic = None
+        if rank == 0 and val_rankic_context is not None:
+            val_rankic_summary = evaluate_val_rankic(model.module, tokenizer, device, config, val_rankic_context)
+            val_mean_rank_ic = val_rankic_summary.get('mean_rank_ic')
+
         if rank == 0:
             print(f"\n--- Epoch {epoch_idx + 1}/{config['epochs']} Summary ---")
             print(f"Validation Loss: {avg_val_loss:.4f}")
+            if _metric_is_valid(val_mean_rank_ic):
+                print(f"Validation mean RankIC: {val_mean_rank_ic:.4f}")
+            else:
+                print("Validation mean RankIC: None")
             print(f"Time This Epoch: {format_time(time.time() - epoch_start_time)}")
             print(f"Total Time Elapsed: {format_time(time.time() - start_time)}\n")
             if logger:
                 logger.log_metric('val_predictor_loss_epoch', avg_val_loss, epoch=epoch_idx, tb_tag='predictor/val/loss')
+                if val_rankic_summary is not None:
+                    for key, tb_tag in (
+                        ('mean_rank_ic', 'predictor/val/mean_rank_ic'),
+                        ('mean_ic', 'predictor/val/mean_ic'),
+                        (f"long_short_top{config.get('eval_topk', 10)}_mean_return", 'predictor/val/long_short_mean_return'),
+                    ):
+                        value = val_rankic_summary.get(key)
+                        if _metric_is_valid(value):
+                            logger.log_metric(key, value, epoch=epoch_idx, tb_tag=tb_tag)
                 logger.log_metric('predictor_epoch_time_seconds', time.time() - epoch_start_time, epoch=epoch_idx, tb_tag='predictor/train/epoch_time_seconds')
 
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
-                save_path = f"{save_dir}/checkpoints/best_model"
-                model.module.save_pretrained(save_path)
-                print(f"Best model saved to {save_path} (Val Loss: {best_val_loss:.4f})")
+                best_val_loss_epoch = epoch_idx + 1
+                save_loss_checkpoint(model, save_dir)
+                print(f"Best loss model saved to {save_dir}/checkpoints/best_model_by_loss (Val Loss: {best_val_loss:.4f})")
                 if logger:
-                    logger.log_model("best_model", save_path)
+                    logger.log_model("best_model_by_loss", f"{save_dir}/checkpoints/best_model_by_loss")
+
+            if _metric_is_valid(val_mean_rank_ic) and val_mean_rank_ic > best_val_rank_ic:
+                best_val_rank_ic = float(val_mean_rank_ic)
+                best_val_rank_ic_epoch = epoch_idx + 1
+                save_rankic_checkpoint(model, save_dir)
+                print(
+                    f"Best RankIC model saved to {save_dir}/checkpoints/best_model_by_rankic "
+                    f"(Val mean RankIC: {best_val_rank_ic:.4f})"
+                )
+                if logger:
+                    logger.log_model("best_model_by_rankic", f"{save_dir}/checkpoints/best_model_by_rankic")
 
         dist.barrier()
 
     dt_result['best_val_loss'] = best_val_loss
+    dt_result['best_val_loss_epoch'] = best_val_loss_epoch
+    dt_result['best_val_rank_ic'] = best_val_rank_ic if _metric_is_valid(best_val_rank_ic) else None
+    dt_result['best_val_rank_ic_epoch'] = best_val_rank_ic_epoch
     return dt_result
 
 
@@ -311,9 +411,16 @@ def main(config: dict):
             comet_logger.log_text('predictor/run_summary', f"```json\n{logger_text}\n```", step=0)
             comet_logger.log_metric('predictor_trainable_parameters', trainable_params, step=0, tb_tag='predictor/model/trainable_parameters')
 
+    val_rankic_context = None
+    if rank == 0:
+        val_rankic_context = build_val_rankic_context(config)
+        print(f"Validation RankIC windows: {len(val_rankic_context['windows'])}")
+
+    dist.barrier()
+
     # Start Training
     dt_result = train_model(
-        model, tokenizer, device, config, save_dir, comet_logger, rank, world_size
+        model, tokenizer, device, config, save_dir, comet_logger, rank, world_size, val_rankic_context
     )
 
     if rank == 0:
@@ -323,6 +430,8 @@ def main(config: dict):
         print('Training finished. Summary file saved.')
         if comet_logger:
             comet_logger.log_metric('predictor_best_val_loss', dt_result['best_val_loss'], step=0, tb_tag='predictor/val/best_loss')
+            if _metric_is_valid(dt_result.get('best_val_rank_ic')):
+                comet_logger.log_metric('predictor_best_val_rank_ic', dt_result['best_val_rank_ic'], step=0, tb_tag='predictor/val/best_rank_ic')
             comet_logger.close()
 
     cleanup_ddp()
