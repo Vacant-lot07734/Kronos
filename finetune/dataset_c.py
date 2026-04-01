@@ -44,7 +44,7 @@ class DailyHourlyDataset(Dataset):
 
         self.hourly_window = int(self.config.__dict__.get(
             "hourly_window",
-            int(os.getenv("KRONOS_HOURLY_WINDOW", "32"))
+            int(os.getenv("KRONOS_HOURLY_WINDOW", "25"))
         ))
 
         if data_type == "train":

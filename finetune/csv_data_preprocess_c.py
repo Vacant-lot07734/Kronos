@@ -29,7 +29,7 @@ def parse_args():
     parser.add_argument("--daily-csv-dir", type=str, help="Directory with *_qfq_day.csv files.")
     parser.add_argument("--hourly-csv-dir", type=str, help="Directory with *_qfq_60min.csv files.")
     parser.add_argument("--output-dir", type=str, help="Output directory for pickles.")
-    parser.add_argument("--hourly-window", type=int, default=32, help="Hourly lookback window L_h.")
+    parser.add_argument("--hourly-window", type=int, default=25, help="Hourly lookback window L_h.")
     parser.add_argument("--min-symbols", type=int, default=10)
     return parser.parse_args()
 
@@ -114,8 +114,9 @@ def _slice_hourly(hourly_df: pd.DataFrame, daily_split_df: pd.DataFrame, hourly_
     if hourly_in_range.empty:
         return pd.DataFrame()
 
-    # Add extra hourly buffer before earliest_daily for the hourly lookback
-    earliest_hourly_needed = earliest_daily - pd.Timedelta(days=hourly_window // 4 + 5)
+    # A trading day currently has 5 hourly bars: 09:30, 10:30, 11:30, 14:00, 15:00.
+    # Estimate the daily buffer from bar count, then leave a few extra days for safety.
+    earliest_hourly_needed = earliest_daily - pd.Timedelta(days=hourly_window // 5 + 5)
     hourly_slice = hourly_in_range.loc[hourly_in_range.index >= earliest_hourly_needed]
     return hourly_slice
 

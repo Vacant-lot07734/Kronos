@@ -1,355 +1,306 @@
-# A/B 实验指导文档
+# 实验执行指南
 
-适用范围：
+本文面向当前仓库中的 A/B/C 实验实现，说明环境、参数、执行顺序、调参方式和结果判断方法。
 
-* A 组：预训练 Kronos 直接推理
-* B 组：只做日线微调
+## 1. 当前实现范围
 
-对应规划见 [lab.md](/home/yzh/workspace/Kronos-0/zlab/lab.md)。
+当前仓库已落地的实验链路：
 
+* A 组：`csv_data_preprocess.py -> evaluate_ab.py`
+* B 组：`csv_data_preprocess.py -> train_predictor.py -> evaluate_ab.py`
+* C 组：`csv_data_preprocess_c.py -> train_predictor_c.py -> evaluate_c.py`
 
-## 1. 当前实验的固定口径
+说明：
 
-### 数据
+* B/C 当前都按 `val loss` 选 `best_model`
+* A/B/C 的最终对比仍以 `RankIC / IC / long-short` 为主
+* C 组保持独立的数据入口和评估入口，不与 B 组预处理脚本合并
 
-当前实验直接使用本地日线 CSV：
+## 2. 环境
 
-* 目录：`zlab/data/daily/`
-* 文件格式：`*_qfq_day.csv`
-* 列：`ts_code, trade_date, open, high, low, close, vol, amount ...`
+训练环境固定为：
 
-### 时间切分
+* Python：`/home/yzh/miniconda3/envs/kronos/bin/python`
+* 激活命令：`conda activate kronos`
 
-* Train：`2025-06-01 ~ 2025-11-30`
-* Val：`2025-12-01 ~ 2025-12-31`
-* Test：`2026-01-01 ~ 2026-02-28`
-
-### 任务
-
-* 历史窗口：`L=20`
-* 预测 horizon：`H=1` 和 `H=5`
-* 预测目标：未来 `H` 日最后一天的收益率
-
-收益率定义：
-
-```text
-pred_return = pred_close_H / last_close - 1
-true_return = true_close_H / last_close - 1
-```
-
-这里的 `last_close` 是历史窗口最后一天收盘价。
-
-## 2. 代码里已经补好的内容
-
-这轮为了让实验能直接落地，已经补了四类入口。
-
-### 2.1 数据预处理
-
-新增：
-
-* `finetune/csv_data_preprocess.py`
-
-作用：
-
-* 直接读取 `zlab/data/daily/*.csv`
-* 转成训练脚本可直接使用的 `train_data.pkl / val_data.pkl / test_data.pkl`
-* 自动给 `val/test` 加 lookback buffer
-* 只保留 train/val/test 三段都能形成样本的股票
-* 额外保存：
-  * `metadata.json`
-  * `symbol_stats.csv`
-
-### 2.2 B 组训练口径
-
-已补：
-
-* `finetune/train_predictor.py`
-* `finetune/dataset.py`
-
-现在 B 组训练支持：
-
-* 跳过 tokenizer 微调，直接用预训练 tokenizer
-* 冻结 predictor 前 `2/3`，只训后 `1/3` + `norm` + `dep_layer` + `head`
-* `future-only loss`
-
-`future-only loss` 的意思是：
-
-* 输入仍然是整段序列
-* 但反向传播只对未来 `H` 个位置算 token CE
-* 不再用整段历史重建 loss 作为主训练目标
-
-这和 [lab.md](/home/yzh/workspace/Kronos-0/zlab/lab.md) 里的实验定义是一致的。
-
-### 2.3 A/B 统一评估
-
-新增：
-
-* `finetune/evaluate_ab.py`
-
-作用：
-
-* 不再依赖 Qlib 回测
-* 直接从 `val_data.pkl / test_data.pkl` 构造评估窗口
-* 统一输出 A/B 两组指标
-
-保存内容包括：
-
-* `predictions.csv`
-* `daily_metrics.csv`
-* `metrics.json`
-* `*_metrics.png`
-
-### 2.4 一键脚本
-
-新增：
-
-* `zlab/scripts/setup_ab_env.sh`
-* `zlab/scripts/check_ab_setup.sh`
-* `zlab/scripts/prepare_ab_data.sh`
-* `zlab/scripts/run_group_a.sh`
-* `zlab/scripts/run_group_b.sh`
-
-## 3. 你实际要做的事
-
-顺序固定，不要跳。
-
-### 第一步：准备环境
+典型准备命令：
 
 ```bash
 conda activate kronos
-zlab/scripts/setup_ab_env.sh
-cp zlab/ab_env.example zlab/ab_env.sh
+cd /home/yzh/workspace/Kronos-0
 source zlab/ab_env.sh
-zlab/scripts/check_ab_setup.sh
 ```
 
-`setup_ab_env.sh` 现在不会自动安装任何包，它只会把建议命令打印出来。  
-你当前仓库应直接使用 `AGENTS.md` 指定的训练环境：
+`zlab/ab_env.sh` 现在作为 A/B/C 共用环境入口，底部包含：
 
-* `PYTHON_BIN`
-* `TORCHRUN_BIN`
+* B 组 override 模板
+* C 组 override 模板
 
-推荐写成：
+每次重新 `source zlab/ab_env.sh`，都会先清理常用 override，避免旧 shell 状态污染下一次实验。
+
+## 3. 关键参数
+
+### 通用参数
+
+* `KRONOS_LOOKBACK_WINDOW`
+  日线历史窗口长度，当前默认 `20`
+* `KRONOS_PREDICT_WINDOW`
+  预测窗口，由 `run_group_*.sh` 根据 `HORIZON` 自动写入
+* `KRONOS_BATCH_SIZE`
+  每卡 batch size
+* `KRONOS_EPOCHS`
+  训练 epoch 数
+* `KRONOS_PREDICTOR_LR`
+  predictor 可训练部分学习率
+* `KRONOS_EVAL_ONLY`
+  `true` 时跳过训练，只做评估
+
+### B 组相关
+
+* `KRONOS_PREDICTOR_TRAIN_LAST_RATIO`
+  predictor 最后多少比例的层参与训练，当前默认 `0.333333`
+* `KRONOS_FREEZE_EMBEDDING`
+  是否冻结 embedding，当前默认 `true`
+
+### C 组相关
+
+* `KRONOS_HOURLY_WINDOW`
+  小时线窗口长度，默认 `25`；当前按 `5` 个交易日、每天 `5` 根小时线设计
+* `KRONOS_HOURLY_LR`
+  小时线 encoder / fusion 的学习率，默认 `1e-4`
+* `KRONOS_HOURLY_ENCODER_LAYERS`
+  小时线 encoder 层数，默认 `2`
+
+## 4. 预测窗口 `H` 的含义
+
+`H` 不只是评估参数，而是会直接改变训练目标：
+
+* 数据集窗口长度依赖 `predict_window`
+* `future-only loss` 只对未来 `H` 步 token 计算
+
+因此正式实验中：
+
+* `H=1` 应单独训练
+* `H=5` 也应单独训练
+
+探索性评估时，可以复用已训练模型跨 horizon 做 `eval-only`。但这类结果只能作为快速探测，不应作为正式结论。
+
+## 5. 执行顺序
+
+### A 组
 
 ```bash
-export PYTHON_BIN="$HOME/miniconda3/envs/kronos/bin/python"
-export TORCHRUN_BIN="$HOME/miniconda3/envs/kronos/bin/torchrun"
-```
-
-### 第二步：准备 H=1 和 H=5 数据
-
-```bash
+conda activate kronos
+cd /home/yzh/workspace/Kronos-0
 source zlab/ab_env.sh
+
 zlab/scripts/prepare_ab_data.sh 1
 zlab/scripts/prepare_ab_data.sh 5
-```
 
-输出目录：
-
-```text
-zlab/results/processed_datasets/h1/
-zlab/results/processed_datasets/h5/
-```
-
-你至少要检查：
-
-* `train_data.pkl`
-* `val_data.pkl`
-* `test_data.pkl`
-* `metadata.json`
-* `symbol_stats.csv`
-
-### 第三步：跑 A 组
-
-```bash
-source zlab/ab_env.sh
 zlab/scripts/run_group_a.sh 1
 zlab/scripts/run_group_a.sh 5
 ```
 
-输出目录：
-
-```text
-zlab/results/evaluations/h1/group_a/
-zlab/results/evaluations/h5/group_a/
-```
-
-### 第四步：跑 B 组
+### B 组
 
 ```bash
+conda activate kronos
+cd /home/yzh/workspace/Kronos-0
 source zlab/ab_env.sh
+
+zlab/scripts/prepare_ab_data.sh 1
+zlab/scripts/prepare_ab_data.sh 5
+
 zlab/scripts/run_group_b.sh 1
 zlab/scripts/run_group_b.sh 5
 ```
 
-输出目录：
+探索性跨 horizon 评估示例：
 
-```text
-zlab/results/models/h1/group_b_predictor/
-zlab/results/models/h5/group_b_predictor/
-zlab/results/evaluations/h1/group_b/
-zlab/results/evaluations/h5/group_b/
+```bash
+source zlab/ab_env.sh
+export KRONOS_EVAL_ONLY="true"
+zlab/scripts/run_group_b.sh 5
 ```
 
-## 4. 训练时需要看什么
+说明：
 
-这里只看两层。
+* 这会尝试复用已有模型做 `H=5` 评估
+* 该结果不作为正式 `H=5` 训练结论
 
-### 4.1 训练过程指标
+### C 组
 
-B 组训练日志里重点看：
+```bash
+conda activate kronos
+cd /home/yzh/workspace/Kronos-0
+source zlab/ab_env.sh
 
-* `Loss`
-* `Validation Loss`
+zlab/scripts/prepare_c_data.sh 1
+zlab/scripts/prepare_c_data.sh 5
 
-它们现在都是：
+zlab/scripts/run_group_c.sh 1
+zlab/scripts/run_group_c.sh 5
+```
 
-* `future-only token CE`
+如果修改了 `KRONOS_HOURLY_WINDOW`，需要重新执行：
 
-不是价格 MAE，也不是 RankIC。
+* `zlab/scripts/prepare_c_data.sh 1`
+* `zlab/scripts/prepare_c_data.sh 5`
+* 以及所有依赖该数据集训练出的 C 组模型评估
 
-### 4.2 怎么判断收敛
+只重新评估已有 C 模型：
 
-可以用下面这个简单标准：
+```bash
+source zlab/ab_env.sh
+export KRONOS_EVAL_ONLY="true"
+export KRONOS_PREDICTOR_SAVE_FOLDER_NAME="group_c_predictor_h1"
+export RESULT_NAME="group_c_h1_eval2"
+zlab/scripts/run_group_c.sh 1
+```
 
-* `Validation Loss` 连续 2 到 3 个 epoch 不再明显下降
-* 同时没有出现 `nan / inf / OOM`
+## 6. 训练时怎么看
 
-如果出现下面这种形态，说明开始过拟合：
+### 当前实现下的训练判断
 
-* 训练 `Loss` 继续下降
-* 但 `Validation Loss` 持平甚至回升
+当前 B/C 训练脚本的 checkpoint 选择标准都是：
 
-当前脚本保存的是：
+* `val loss`
 
-* 验证集 `Validation Loss` 最低的 checkpoint
+所以训练阶段首先看：
 
-也就是：
+* `train loss`
+* `val loss`
+* TensorBoard 里的 `s1_loss / s2_loss / grad_norm / lr`
 
-* `zlab/results/models/.../checkpoints/best_model/`
+一般判断：
 
-## 5. 测试时怎么看结果
+* `train loss` 和 `val loss` 同时下降：优化正常
+* `train loss` 下降但 `val loss` 持续上升：过拟合
+* `val loss` 基本不动：当前学习率太低、解冻范围太小或 epoch 不够
 
-最终比较 A/B，不看训练 loss，主要看 `metrics.json`。
+### 对 B 组的调参建议
 
-### 5.1 主指标
+建议一次只改一个维度。
+
+优先顺序：
+
+1. 学习率
+2. epoch
+3. batch size
+4. 解冻比例
+
+建议起点：
+
+* `lr=5e-5`
+* `batch_size=32`
+* `epochs=10`
+
+常见搜索：
+
+* `5e-5 -> 3e-5 -> 2e-5 -> 1e-5`
+* `epochs: 5 / 10 / 15`
+
+### 对 C 组的调参建议
+
+先固定 C 的结构，再调超参。推荐顺序：
+
+1. 先固定 `hourly_window=25`
+2. 先固定 `hourly_encoder_layers=2`
+3. 先用 `predictor_lr=5e-5`，`hourly_lr=1e-4`
+4. 只有在 B 基线稳定后，再扫 C 的超参
+
+否则很难分辨：
+
+* 提升来自小时线信息
+* 还是来自训练策略变化
+
+## 7. 测试时怎么看
+
+测试阶段不再看 token loss，而是看下游金融指标。
 
 优先顺序建议：
 
-* `mean_rank_ic`
-* `mean_ic`
-* `rank_ic_ir`
+1. `mean_rank_ic`
+2. `mean_ic`
+3. `rank_ic_ir`
+4. `long_short_top10_mean_return`
+5. `top10_mean_return`
 
 解释：
 
-* `mean_rank_ic`
-  最重要。它反映模型对横截面排序是否更好。
-* `mean_ic`
-  看线性相关性。
-* `rank_ic_ir`
-  看排序能力是否稳定，不只是偶然几天好。
+* `mean_rank_ic` 是主排序指标
+* `mean_ic` 与 `rank_ic_ir` 用来补充线性相关性和稳定性
+* `long_short` 与 `top-k` 用来判断排序信号是否能转化成收益
 
-### 5.2 辅指标
+### 结果对比时的约束
 
-还要看：
+正式比较前必须确认：
 
-* `direction_accuracy`
-* `mae`
-* `rmse`
+* 股票池一致
+* 时间切分一致
+* `sample_count / top_p / temperature` 一致
+* `H` 一致
+
+如果股票池不同，结论必须显式写成“不同股票池下的结果”，不能直接解释成模型结构差异。
+
+## 8. 当前实现下的结论表述
+
+当前 B/C 的更准确表述是：
+
+* “在相同 `val loss` 选模协议下，比较下游金融指标差异”
+
+而不是：
+
+* “比较各自最优金融指标 checkpoint 的最好结果”
+
+如果后续要升级为正式实验口径，再做两件事：
+
+1. 用 `val mean RankIC` 选模
+2. 保证 B/C 在完全相同股票池上比较
+
+## 9. 常见问题
+
+### 1. `torch` 与 CUDA 不兼容
+
+现象：
+
+* 一启动训练就报 CUDA/driver 相关错误
+
+处理方向：
+
+* 不改共享服务器驱动
+* 只修自己 conda 环境中的 `torch`
+
+### 2. C 组股票池缩小
+
+现象：
+
+* `h1_c` 或 `h5_c` 的 `n_symbols_kept` 低于 B 组
+
+原因：
+
+* 小时线覆盖不足
+* 某些股票在某个 split 中不满足 `hourly_window`
+
+### 3. 结果抖动
+
+现象：
+
+* 同一模型重复评估，`RankIC` 或 `top-k` 有小幅波动
+
+原因：
+
+* 当前评估仍使用采样
+
+处理：
+
+* 比较接近的实验时，不要只凭单次结果下结论
+
+### 4. `H=1` 模型在 `H=5` 上看起来也不错
 
 解释：
 
-* `direction_accuracy`
-  看涨跌方向是否判断得更准。
-* `mae / rmse`
-  看预测收益率偏差有多大。
+* 这说明模型有一定跨 horizon 泛化
+* 但不代表可以省掉正式的 `H=5` 训练
 
-### 5.3 策略代理指标
-
-为了补充“排序指标是否真能转成选股收益”，还会输出：
-
-* `top10_mean_return`
-* `top10_cum_return`
-* `long_short_top10_mean_return`
-* `long_short_top10_cum_return`
-
-这不是完整交易回测，而是轻量的 Top-K 收益代理。
-
-比较时看法很简单：
-
-* 如果 B 的 `mean_rank_ic` 提升，同时 `top10_mean_return` 也提升
-* 可以认为 B 比 A 更有价值
-
-## 6. 结果文件怎么读
-
-以 `zlab/results/evaluations/h1/group_a/test/` 为例：
-
-* `metrics.json`
-  最终汇总，先看这个。
-* `predictions.csv`
-  每个样本的预测结果，适合排查单只股票。
-* `daily_metrics.csv`
-  每天的 `IC / RankIC / Top-K Return`。
-* `test_metrics.png`
-  累计收益代理曲线和日度 IC 曲线。
-
-### 最小对比方法
-
-你只要把四个文件拿出来对比就够了：
-
-* `zlab/results/evaluations/h1/group_a/test/metrics.json`
-* `zlab/results/evaluations/h1/group_b/test/metrics.json`
-* `zlab/results/evaluations/h5/group_a/test/metrics.json`
-* `zlab/results/evaluations/h5/group_b/test/metrics.json`
-
-## 7. 你现在最该关心的改动项
-
-如果你不熟训练，优先记住这几个地方。
-
-### 必改配置
-
-通常只需要改 `zlab/ab_env.sh`：
-
-* `PYTHON_BIN`
-* `TORCHRUN_BIN`
-* `DEVICE`
-* `KRONOS_PRETRAINED_TOKENIZER_PATH`
-* `KRONOS_PRETRAINED_PREDICTOR_PATH`
-
-### 一般不用改
-
-除非实验不稳定，否则先不要动：
-
-* `KRONOS_LOOKBACK_WINDOW=20`
-* `KRONOS_BATCH_SIZE=32`
-* `KRONOS_EPOCHS=10`
-* `KRONOS_PREDICTOR_LR=5e-5`
-* `KRONOS_PREDICTOR_TRAIN_LAST_RATIO=0.333333`
-* `KRONOS_FUTURE_ONLY_LOSS=true`
-
-## 8. 推荐执行顺序
-
-不要一上来四个实验一起跑。先这样：
-
-1. `prepare_ab_data.sh 1`
-2. `run_group_a.sh 1`
-3. `run_group_b.sh 1`
-4. 先看 `h1` 的 `metrics.json`
-5. 没问题再跑 `h5`
-
-理由很简单：
-
-* `H=1` 更快
-* 先确认流程、指标、保存路径都对
-* 再跑 `H=5`
-
-## 9. 一句话判断实验结论
-
-最后只需要回答两个问题：
-
-* `H=1` 上，B 的 `test mean_rank_ic` 是否高于 A？
-* `H=5` 上，B 的 `test mean_rank_ic` 和 `top10_mean_return` 是否同时高于 A？
-
-如果答案是“是”，那这轮 A/B 实验就完成了，而且结论是清楚的：
-
-* 日线微调值得做
+正式实验里，`H=5` 仍应单独训练。

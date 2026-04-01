@@ -84,7 +84,7 @@ export KRONOS_EVAL_RESULT_PATH_BASE="$KRONOS_RESULTS_ROOT/evaluations"
 # These variables are only consumed by `run_group_c.sh`.
 # -------------------------------------------------------------------
 # export KRONOS_EVAL_ONLY="false"  # true: reuse existing C checkpoint and only evaluate
-# export KRONOS_HOURLY_WINDOW="32"  # hourly lookback length L_h
+# export KRONOS_HOURLY_WINDOW="25"  # hourly lookback length L_h, 5 trading days * 5 hourly bars/day
 # export KRONOS_HOURLY_LR="1e-4"  # learning rate for hourly encoder + fusion
 # export KRONOS_HOURLY_ENCODER_LAYERS="2"  # depth of hourly encoder
 # export KRONOS_PREDICTOR_LR="5e-5"  # learning rate for the trainable Kronos upper layers

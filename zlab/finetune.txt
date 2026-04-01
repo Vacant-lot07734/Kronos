@@ -1,180 +1,158 @@
-当前补充说明
+# finetune 包说明
 
-当前用于 `zlab/lab.md` A/B 实验的推荐链路是 `csv_data_preprocess.py -> train_predictor.py -> evaluate_ab.py`。运行入口是 `zlab/scripts/prepare_ab_data.sh`、`zlab/scripts/run_group_a.sh`、`zlab/scripts/run_group_b.sh`。日志会自动落盘：
+## 作用
 
-* A 组推理日志：`zlab/results/evaluations/h*/group_a/inference.log`
-* B 组训练日志：`zlab/results/models/h*/<save_folder>/train.log`
-* B 组推理日志：`zlab/results/evaluations/h*/group_b/inference.log`
-* `zlab/scripts/run_group_b.sh` 默认执行训练+评估；设置 `KRONOS_EVAL_ONLY=true` 时只做评估，不重新训练
-* 当 `KRONOS_EVAL_ONLY=true` 且当前 `H != 1` 时，脚本默认复用 `h1/<save_folder>/checkpoints/best_model` 作为已训练模型；如需改成其他来源，可显式设置 `KRONOS_EVAL_MODEL_HORIZON`
-* `zlab/ab_env.sh` 现在作为 A/B/C 共用环境入口；每次 `source` 时会先清理常用实验覆盖变量，例如 `KRONOS_PREDICTOR_LR`、`KRONOS_BATCH_SIZE`、`KRONOS_EPOCHS`、`KRONOS_PREDICTOR_SAVE_FOLDER_NAME`、`RESULT_NAME`、`KRONOS_EVAL_ONLY`、`KRONOS_HOURLY_WINDOW`，避免旧 shell 状态串到下一次实验
-* `train_predictor.py` / `train_tokenizer.py` 已改为 Comet 懒加载；关闭 Comet 时，不再要求环境里安装 `comet_ml`
-* TensorBoard 本地日志默认写到 `zlab/results/models/h*/<save_folder>/tensorboard`
-* 如果环境里未安装 `tensorboard` 包，训练不会中断，只会打印 warning 并跳过 TensorBoard
-* 查看 TensorBoard 的典型命令：`tensorboard --logdir zlab/results/models`
-* A/B 环境默认开启 `KRONOS_NORMALIZE_WITH_CONTEXT_ONLY=true`：训练集窗口的归一化统计量只用历史 `lookback` 段计算，以与推理阶段的 context-only 归一化保持一致
+`finetune/` 目录当前承载两条链路：
 
-C 组补充
+* 旧版 Qlib demo 链路
+* 当前 A/B/C 本地 CSV 实验链路
 
-当前 C 组链路是 `csv_data_preprocess_c.py -> train_predictor_c.py -> evaluate_c.py`，运行入口是 `zlab/scripts/prepare_c_data.sh`、`zlab/scripts/run_group_c.sh`。`run_group_c.sh` 也支持 `KRONOS_EVAL_ONLY=true`，只做评估，不重复训练。
+本文只说明代码职责、训练/测试口径和当前改动边界，不重复实验设计细节。实验目标与判定口径见 `zlab/lab.md`，执行流程见 `zlab/experiment_guide.md`。
 
-2026-04-01 已修复三项会影响 C 组稳定性的实现问题：
+## 旧版链路
 
-* `dataset_c.py` 不再使用错误的 `pd.os.environ`，改为标准 `os.getenv(...)` 读取 `KRONOS_HOURLY_WINDOW`
-* `dataset.py` 和 `dataset_c.py` 的验证集采样改为按 `idx` 取样，不再像训练集一样随机抽样；这样 `DistributedSampler` 在验证阶段才是确定性的
-* `train_predictor_c.py` 中的 C 组默认配置不再用失效的 `setdefault(...)`，而是仅在对应环境变量未显式设置时才回落到 C 组默认值
+旧版标准流程：
 
-当前 C 组仍沿用与 B 组一致的选模协议：
+* `qlib_data_preprocess.py`
+* `train_tokenizer.py`
+* `train_predictor.py`
+* `qlib_test.py`
+
+训练逻辑：
+
+* `train_tokenizer.py`：优化重建类 loss 与 `bsq_loss`，按 `val_tokenizer_loss_epoch` 选 best checkpoint
+* `train_predictor.py`：优化 token-level 自回归 loss，按 `val_predictor_loss_epoch` 选 best checkpoint
+
+测试逻辑：
+
+* `qlib_test.py` 在测试集上生成 signal
+* 再通过 `TopkDropoutStrategy` 做 Qlib 回测
+* 主要输出是策略层结果，不是统一的收益预测统计指标
+
+## 当前本地实验链路
+
+### A/B
+
+当前推荐链路：
+
+* `csv_data_preprocess.py`
+* `train_predictor.py`
+* `evaluate_ab.py`
+
+职责：
+
+* `csv_data_preprocess.py`：从 `zlab/data/daily/*.csv` 生成 `train/val/test_data.pkl`
+* `train_predictor.py`：冻结 tokenizer，部分解冻 predictor，做日线微调
+* `evaluate_ab.py`：输出 `RankIC / IC / DA / MAE / RMSE / top-k / long-short`
+
+### C
+
+当前推荐链路：
+
+* `csv_data_preprocess_c.py`
+* `train_predictor_c.py`
+* `evaluate_c.py`
+
+职责：
+
+* `csv_data_preprocess_c.py`：生成 `{"daily": ..., "hourly": ...}` 双流数据
+* `train_predictor_c.py`：训练日线 predictor 上层 + 小时线 encoder/fusion
+* `evaluate_c.py`：以与 A/B 一致的统计指标评估 C 组
+
+## 当前相对旧版的主要改动
+
+### 1. 数据接入改成了本地 CSV
+
+当前不再依赖 Qlib 原始数据目录，而是直接使用：
+
+* `zlab/data/daily/*.csv`
+* `zlab/data/hourly/*.csv`（C 组）
+
+同时补了几项实验需要的约束：
+
+* `val/test` 自动带 lookback buffer
+* 输出 `metadata.json`
+* 输出 `symbol_stats.csv`
+* 样本过滤按 `target_end_time` 落在正式 split 区间内进行
+
+### 2. 训练协议从“全量 demo”改成“轻量任务适配”
+
+当前 A/B/C 默认使用：
+
+* `skip_tokenizer_finetune=true`
+* `future_only_loss=true`
+* `freeze_embedding=true`
+* `predictor_train_last_ratio=0.333333`
+
+A/B 环境默认还开启：
+
+* `normalize_with_context_only=true`
+
+即训练归一化只用历史 `lookback` 段统计量，与推理口径一致。
+
+### 3. 评估目标从“回测优先”改成“收益预测统计指标优先”
+
+旧版测试更接近 demo 风格回测。当前 A/B/C 的主评估指标是：
+
+* `mean_rank_ic`
+* `mean_ic`
+* `rank_ic_ir`
+* `direction_accuracy`
+* `mae`
+* `rmse`
+* `topk_mean_return`
+* `long_short_topk_mean_return`
+
+也就是说，当前测试口径更接近“未来收益排序能力评估”，不是单纯生成 signal 后直接回测。
+
+## 当前 B/C 的训练与选模口径
+
+这一点需要单独写清楚。
+
+当前 B/C 都是：
 
 * 训练主损失：`future-only token loss`
 * checkpoint 选择：`val loss`
 * 最终对比指标：`RankIC / IC / DA / MAE / RMSE / top-k / long-short`
 
-这意味着当前 B/C 的对比是“在同样的 `val loss` 选模协议下，看下游金融指标的差异”，而不是“各自最优 RankIC checkpoint 的最优表现对比”。
+因此当前实验结论应解释为：
 
-设备说明
+* “在相同 `val loss` 选模协议下，比较 B/C 的下游金融指标差异”
 
-* A 组评估允许 `DEVICE=auto`，会优先尝试当前 `torch` 可用的 GPU。
-* B 组训练保持 `torchrun + CUDA` 路径，不做 CPU fallback。
-* 如果 `torch` 与服务器 CUDA/驱动不兼容，B 组训练应直接修复环境中的 `torch` 版本，而不是继续改训练逻辑。
+而不是：
 
-旧代码逻辑梳理
+* “比较 B/C 各自最优 RankIC checkpoint 的最好结果”
 
-旧版 `finetune` 的标准链路是 `qlib_data_preprocess.py -> train_tokenizer.py -> train_predictor.py -> qlib_test.py`。
+## C 组额外实现说明
 
-旧训练逻辑
+C 组在现有 Kronos predictor 外新增：
 
-* `train_tokenizer.py`：训练 tokenizer / VQ-VAE，损失是 `recon_loss_pre + recon_loss_all` 与 `bsq_loss` 的组合，batch loss 为 `(recon_loss + bsq_loss) / 2`。
-* tokenizer 训练日志重点记录 `train_tokenizer_loss_batch`、`train_vqvae_vq_loss_each_batch`、`train_recon_loss_pre_each_batch`、`train_recon_loss_each_batch`，epoch 级只看 `val_tokenizer_loss_epoch`。
-* tokenizer checkpoint 选择标准只有一个：`Validation Loss` 最低。
-* `train_predictor.py`：先用 tokenizer 编码，再做自回归 next-token 预测，通过 `model.module.head.compute_loss(...)` 计算 token-level loss。
-* predictor 训练日志重点记录 `train_predictor_loss_batch`、`train_S1_loss_each_batch`、`train_S2_loss_each_batch`、`predictor_learning_rate`，epoch 级只看 `val_predictor_loss_epoch`。
-* predictor checkpoint 同样只按 `Validation Loss` 选择。
+* `models/hourly_encoder.py`
+* `models/hourly_fusion.py`
+* `models/kronos_with_hourly.py`
 
-旧测试逻辑
+并通过：
 
-* `qlib_test.py` 只加载 `test_data.pkl`。
-* 脚本在测试集上滚动推理，再从预测的 `close` 序列构造四种 signal：`last`、`mean`、`max`、`min`。
-* 这些 signal 会送入 `TopkDropoutStrategy`，再用 Qlib 回测。
-* 旧测试的主要输出是策略层结果：`Benchmark Return`、`Excess Return (w/o cost)`、`Excess Return (w/ cost)` 和累计收益曲线。
-* 旧 `qlib_test.py` 没有显式计算 `RankIC/IC/MAE/RMSE`，它更接近 demo 风格的“生成 signal -> 直接回测”。
+* `dataset_c.py`
+* `train_predictor_c.py`
+* `evaluate_c.py`
 
-旧代码训练 / 测试分别用哪些指标
+完成双流训练和评估。
 
-* 旧训练：tokenizer 看重建类 loss 与 `bsq_loss`，predictor 看 token-level 自回归 loss，checkpoint 都按 validation loss 选。
-* 旧测试：看 Qlib 回测指标，重点是基准收益、超额收益、累计收益曲线。
-* 旧链路是典型的“训练看 loss，测试看回测”，没有统一的收益预测监督指标体系。
+当前没有把 `csv_data_preprocess.py` 与 `csv_data_preprocess_c.py` 再抽成共享 helper。保持两个入口是有意的：B 和 C 的输出 schema 不同，当前先优先保证入口清晰和实验稳定。
 
-当前修改到底改了什么
+## 日志与可视化
 
-当前对 `finetune` 的修改不只是为了接自己的数据，也不只是为了只微调 predictor 上层 block，至少有三类变化。
+当前训练和评估日志会自动落盘：
 
-1. 数据接入与切分口径
+* A 组推理日志：`zlab/results/evaluations/h*/group_a/inference.log`
+* B 组训练日志：`zlab/results/models/h*/<save_folder>/train.log`
+* B 组推理日志：`zlab/results/evaluations/h*/group_b/inference.log`
+* C 组训练日志：`zlab/results/models/h*/<save_folder>/train.log`
+* C 组推理日志：`zlab/results/evaluations/h*/<result_name>/inference.log`
 
-* 新增 `csv_data_preprocess.py`，不再依赖 Qlib 原始数据目录。
-* 统一从本地日线 CSV 生成 `train/val/test_data.pkl`。
-* 除了换数据源，还补了 lookback buffer、`metadata.json` 和按 `target_end_time` 过滤验证样本的逻辑，目的是把 `val/test` 边界定义清楚。
+TensorBoard 默认开启，本地目录为：
 
-2. 训练协议
+* `zlab/results/models/h*/<save_folder>/tensorboard`
 
-* 当前 `train_predictor.py` 支持跳过 tokenizer 微调，直接使用预训练 tokenizer。
-* 支持只训练 predictor 后部 block 与 `norm/dep_layer/head`。
-* 支持 `future-only loss`。
-* A/B 环境下支持 `context-only normalization`，避免训练阶段把未来窗口一起用于标准化统计。
-* 因此当前训练与旧代码“同属 token loss 家族”，但不完全相同。关闭 `future_only_loss` 时与旧 predictor 更接近；开启后则改成只对未来预测段算 loss。
-
-3. 评估目标与评估指标
-
-* 新增 `evaluate_ab.py` 的根本原因，不是单纯为了换数据，而是因为当前 A/B 实验要比较“未来收益预测 / 排序能力”。
-* 当前测试阶段的主要输出改成 `mean_rank_ic`、`rank_ic_ir`、`mean_ic`、`direction_accuracy`、`mae`、`rmse`、`topk_mean_return`、`long_short_topk_mean_return`、`topk_cum_return`、`long_short_topk_cum_return`。
-* 当前测试同时输出 `val` 和 `test`，这也不同于旧 `qlib_test.py` 只看 `test`。
-
-当前训练、测试指标和旧代码一致吗
-
-* 训练指标：不完全一致。相同点是当前训练仍然由 token-level loss 驱动，best checkpoint 仍按 validation loss 选择；不同点是当前 B 组默认跳过 tokenizer、支持 partial-freeze，且默认开启 `future_only_loss`。
-* 测试指标：不一致。旧测试是回测优先，当前 A/B 测试是收益预测指标优先，主看 `RankIC/IC`，回报类指标变成辅助的 top-k / long-short proxy。
-
-所以如果你的问题是：
-
-“当前改代码是不是仅仅为了适配自己的数据和上层 block 微调？”
-
-答案是：
-
-* 不是
-* 还包括把评估目标从“Qlib demo 式回测输出”切换成“面向 A/B 实验的统一收益预测评估”
-
-如果你的问题是：
-
-“当前训练、测试指标和旧代码一致吗？”
-
-答案是：
-
-* 训练：部分一致，部分不一致
-* 测试：不一致
-
-下面这段仍保留为“官方 Qlib 版说明”，仅作参考。
-
-******官方提示******
-环境要求
-首先确保已安装 requirements.txt 中的所有依赖项
-本流程依赖 qlib，请通过以下命令安装：
-
-pip install pyqlib
-
-需要准备 Qlib 数据。请遵循 Qlib 官方指南 下载并在本地设置数据。示例脚本假定您使用日频数据
-步骤一：配置实验
-所有数据、训练和模型路径的设置均集中在 finetune/config.py 中。在运行任何脚本前，请根据您的环境修改以下路径：
-
-qlib_data_path: 您本地 Qlib 数据目录的路径。
-dataset_path: 用于保存处理后的训练/验证/测试 pickle 文件的目录。
-save_path: 保存模型检查点的基目录。
-backtest_result_path: 用于保存回测结果的目录。
-pretrained_tokenizer_path 和 pretrained_predictor_path: 您希望从中开始训练的预训练模型路径（可以是本地路径或 Hugging Face 模型名称）。
-您还可以调整其他参数，如 instrument、train_time_range、epochs 和 batch_size，以适应您的具体任务。如果不使用 Comet.ml，请设置 use_comet = False。
-
-步骤 2：准备数据集
-运行数据预处理脚本。该脚本将从您的 Qlib 目录加载原始市场数据，进行处理，将其分割为训练集、验证集和测试集，并保存为 pickle 文件。
-
-python finetune/qlib_data_preprocess.py
-
-运行后，您将在配置文件中 dataset_path 指定的目录中找到 train_data.pkl、val_data.pkl 和 test_data.pkl。
-
-步骤 3：运行微调
-微调过程包含两个阶段：首先微调分词器，然后微调预测器。两个训练脚本均设计为使用 torchrun 进行多 GPU 训练。
-
-3.1 微调分词器
-此步骤调整分词器以适应您特定领域的数据分布。
-
-# Replace NUM_GPUS with the number of GPUs you want to use (e.g., 2)
-torchrun --standalone --nproc_per_node=NUM_GPUS finetune/train_tokenizer.py
-
-最佳分词器检查点将被保存到 config.py 中配置的路径（该路径由 save_path 和 tokenizer_save_folder_name 派生而来）。
-
-3.2 微调预测器
-此步骤针对预测任务微调主要的 Kronos 模型。
-
-# Replace NUM_GPUS with the number of GPUs you want to use (e.g., 2)
-torchrun --standalone --nproc_per_node=NUM_GPUS finetune/train_predictor.py
-
-最佳预测器检查点将被保存到 config.py 中配置的路径。
-
-步骤 4：通过回测进行评估
-最后，运行回测脚本来评估您微调后的模型。该脚本会加载模型，在测试集上执行推理，生成预测信号（例如，预测价格变动），并运行一个简单的 Top-K 策略回测。
-
-# Specify the GPU for inference
-python finetune/qlib_test.py --device cuda:0
-
-脚本将在控制台输出详细的性能分析，并生成一张图表，显示您的策略相对于基准的累计收益曲线，类似于下图所示：
-
-******适应化改造******
-
-沿用官方 Qlib 预处理
-跳过 tokenizer 微调
-直接做 predictor 微调
-用官方回测脚本或其改造版评估
-
-也就是：
-qlib_data_preprocess.py：用
-train_tokenizer.py：先不做
-train_predictor.py：做
-qlib_test.py：做
+Comet 已改为懒加载；关闭 Comet 时，不再要求环境里安装 `comet_ml`。

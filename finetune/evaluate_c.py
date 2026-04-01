@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument("--result-save-path", type=str, required=True)
     parser.add_argument("--result-name", type=str, required=True)
     parser.add_argument("--pred-len", type=int)
-    parser.add_argument("--hourly-window", type=int, default=32)
+    parser.add_argument("--hourly-window", type=int, default=25)
     parser.add_argument("--sample-count", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=64,
                         help="Inference batch size (may need to be smaller than AB due to hourly context).")
