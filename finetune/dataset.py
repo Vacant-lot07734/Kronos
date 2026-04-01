@@ -138,9 +138,13 @@ class QlibDataset(Dataset):
                 - x_tensor (torch.Tensor): The normalized feature tensor.
                 - x_stamp_tensor (torch.Tensor): The time feature tensor.
         """
-        # Select a random sample from the entire pool of indices.
-        random_idx = self.py_rng.randint(0, len(self.indices) - 1)
-        symbol, start_idx = self.indices[random_idx]
+        # Keep training stochastic, but make validation index-driven so the
+        # DistributedSampler can deterministically shard samples across ranks.
+        if self.data_type == 'train':
+            sample_idx = self.py_rng.randint(0, len(self.indices) - 1)
+        else:
+            sample_idx = idx % len(self.indices)
+        symbol, start_idx = self.indices[sample_idx]
 
         # Extract the sliding window from the dataframe.
         df = self.data[symbol]

@@ -7,12 +7,30 @@
 * B 组推理日志：`zlab/results/evaluations/h*/group_b/inference.log`
 * `zlab/scripts/run_group_b.sh` 默认执行训练+评估；设置 `KRONOS_EVAL_ONLY=true` 时只做评估，不重新训练
 * 当 `KRONOS_EVAL_ONLY=true` 且当前 `H != 1` 时，脚本默认复用 `h1/<save_folder>/checkpoints/best_model` 作为已训练模型；如需改成其他来源，可显式设置 `KRONOS_EVAL_MODEL_HORIZON`
-* `zlab/ab_env.sh` 每次 `source` 时会先清理常用实验覆盖变量，例如 `KRONOS_PREDICTOR_LR`、`KRONOS_BATCH_SIZE`、`KRONOS_EPOCHS`、`KRONOS_PREDICTOR_SAVE_FOLDER_NAME`、`RESULT_NAME`、`KRONOS_EVAL_ONLY`，避免旧 shell 状态串到下一次实验
+* `zlab/ab_env.sh` 现在作为 A/B/C 共用环境入口；每次 `source` 时会先清理常用实验覆盖变量，例如 `KRONOS_PREDICTOR_LR`、`KRONOS_BATCH_SIZE`、`KRONOS_EPOCHS`、`KRONOS_PREDICTOR_SAVE_FOLDER_NAME`、`RESULT_NAME`、`KRONOS_EVAL_ONLY`、`KRONOS_HOURLY_WINDOW`，避免旧 shell 状态串到下一次实验
 * `train_predictor.py` / `train_tokenizer.py` 已改为 Comet 懒加载；关闭 Comet 时，不再要求环境里安装 `comet_ml`
 * TensorBoard 本地日志默认写到 `zlab/results/models/h*/<save_folder>/tensorboard`
 * 如果环境里未安装 `tensorboard` 包，训练不会中断，只会打印 warning 并跳过 TensorBoard
 * 查看 TensorBoard 的典型命令：`tensorboard --logdir zlab/results/models`
 * A/B 环境默认开启 `KRONOS_NORMALIZE_WITH_CONTEXT_ONLY=true`：训练集窗口的归一化统计量只用历史 `lookback` 段计算，以与推理阶段的 context-only 归一化保持一致
+
+C 组补充
+
+当前 C 组链路是 `csv_data_preprocess_c.py -> train_predictor_c.py -> evaluate_c.py`，运行入口是 `zlab/scripts/prepare_c_data.sh`、`zlab/scripts/run_group_c.sh`。`run_group_c.sh` 也支持 `KRONOS_EVAL_ONLY=true`，只做评估，不重复训练。
+
+2026-04-01 已修复三项会影响 C 组稳定性的实现问题：
+
+* `dataset_c.py` 不再使用错误的 `pd.os.environ`，改为标准 `os.getenv(...)` 读取 `KRONOS_HOURLY_WINDOW`
+* `dataset.py` 和 `dataset_c.py` 的验证集采样改为按 `idx` 取样，不再像训练集一样随机抽样；这样 `DistributedSampler` 在验证阶段才是确定性的
+* `train_predictor_c.py` 中的 C 组默认配置不再用失效的 `setdefault(...)`，而是仅在对应环境变量未显式设置时才回落到 C 组默认值
+
+当前 C 组仍沿用与 B 组一致的选模协议：
+
+* 训练主损失：`future-only token loss`
+* checkpoint 选择：`val loss`
+* 最终对比指标：`RankIC / IC / DA / MAE / RMSE / top-k / long-short`
+
+这意味着当前 B/C 的对比是“在同样的 `val loss` 选模协议下，看下游金融指标的差异”，而不是“各自最优 RankIC checkpoint 的最优表现对比”。
 
 设备说明
 
