@@ -39,11 +39,12 @@ source zlab/ab_env.sh
 
 每次重新 `source zlab/ab_env.sh`，都会先清理常用 override，避免旧 shell 状态污染下一次实验。
 
-当前 runner 的默认行为：
+当前 runner 的默认命名：
 
-* A 组结果目录自动追加 `pred_len / sample_count / sampling` 后缀
-* B/C 模型目录自动追加主要训练参数后缀
-* B/C 训练结束后，会分别对 `best_model_by_loss` 与 `best_model_by_rankic` 跑一次推理，便于直接对比
+* A 组结果目录默认是 `group_a`
+* B 组模型和结果目录默认是 `group_b_lr{lr}_e{epochs}_bs{batch}`
+* C 组模型和结果目录默认是 `group_c_hlr{hourly_lr}_lr{predictor_lr}_e{epochs}_bs{batch}`
+* B/C 测试结果目录下固定生成两个子目录：`cross-entropy/` 与 `rankIc/`
 
 ## 3. 关键参数
 
@@ -61,10 +62,12 @@ source zlab/ab_env.sh
   predictor 可训练部分学习率
 * `KRONOS_EVAL_ONLY`
   `true` 时跳过训练，只做评估
+* `KRONOS_INFERENCE_SAMPLE_COUNT`
+  单样本推理时的内部采样条数，当前默认 `10`
 * `KRONOS_PREDICTOR_SAVE_FOLDER_NAME`
-  模型目录名前缀；runner 会自动追加参数后缀
+  模型目录名；默认使用脚本生成的参数化名称
 * `RESULT_NAME`
-  评估目录名前缀；runner 会自动追加参数后缀与 checkpoint 标记
+  评估目录名；默认使用脚本生成的参数化名称
 
 ### B 组相关
 
@@ -164,30 +167,59 @@ zlab/scripts/run_group_c.sh 5
 ```bash
 source zlab/ab_env.sh
 export KRONOS_EVAL_ONLY="true"
-export KRONOS_PREDICTOR_SAVE_FOLDER_NAME="group_c_predictor"
-export RESULT_NAME="group_c_h1_eval2"
+export KRONOS_PREDICTOR_SAVE_FOLDER_NAME="group_c_hlr1e4_lr5e5_e10_bs64"
+export RESULT_NAME="group_c_hlr1e4_lr5e5_e10_bs64"
 zlab/scripts/run_group_c.sh 1
 ```
+
+顺序扫多组 C 组超参数：
+
+```bash
+conda activate kronos
+cd /home/yzh/workspace/Kronos-0
+source zlab/ab_env.sh
+
+export KRONOS_C_SWEEP_HORIZONS="1"
+export KRONOS_C_SWEEP_PRED_LRS="5e-5 3e-5 2e-5"
+export KRONOS_C_SWEEP_HOURLY_LRS="1e-4"
+export KRONOS_C_SWEEP_BATCH_SIZES="64"
+export KRONOS_C_SWEEP_EPOCHS_LIST="10"
+export KRONOS_C_SWEEP_HOURLY_WINDOWS="25"
+export KRONOS_C_SWEEP_ENCODER_LAYERS="2"
+export KRONOS_C_SWEEP_PREPARE_DATA="false"
+
+bash zlab/scripts/run_group_c_sweep.sh
+```
+
+说明：
+
+* `run_group_c_sweep.sh` 会顺序执行，不会并行占用同一张 GPU
+* 默认沿用 `ab_env.sh` 当前值；只有你显式设置的 sweep 变量会形成组合
+* 如果 sweep 中包含多个 `hourly_window`，必须设置 `KRONOS_C_SWEEP_PREPARE_DATA=true`
+* sweep 日志和状态表会写到 `zlab/results/sweeps/`
 
 ## 6. 训练时怎么看
 
 ### 当前实现下的训练判断
 
-当前 B/C 训练脚本会同时维护两类 checkpoint：
+当前 B/C 训练脚本会维护两类 checkpoint：
 
 * `best_model_by_loss`
 * `best_model_by_rankic`
 
 其中：
 
-* `val loss` 用于保存 `best_model_by_loss`
-* `val mean_rank_ic` 用于保存 `best_model_by_rankic`
+* 每个 epoch 只计算 `val loss`
+* `val loss` 用于在线保存 `best_model_by_loss`
+* 同时保存每个 epoch 的 checkpoint 到 `checkpoints/epochs/`
+* 训练结束后，再统一在验证集上扫描这些 epoch checkpoint
+* 验证集 `mean_rank_ic` 最优的那个 epoch 会被复制为 `best_model_by_rankic`
+* 测试集只在训练完成后推理两次：一次 `cross-entropy`，一次 `rankIc`
 
 所以训练阶段首先看：
 
 * `train loss`
 * `val loss`
-* `val mean_rank_ic`
 * TensorBoard 里的 `s1_loss / s2_loss / grad_norm / lr`
 
 一般判断：
@@ -311,6 +343,39 @@ zlab/scripts/run_group_c.sh 1
 * 当前评估仍使用采样
 
 处理：
+
+* 固定 `sample_count / top_p / temperature`
+* 使用统一脚本汇总多个实验结果，而不是手工逐个查看 `metrics.json`
+
+## 10. 结果对比脚本
+
+可直接使用：
+
+```bash
+conda activate kronos
+cd /home/yzh/workspace/Kronos-0
+
+python zlab/scripts/compare_eval_metrics.py \
+  --root zlab/results/evaluations \
+  --output-dir zlab/results/evaluation_comparisons
+```
+
+默认会递归读取 `zlab/results/evaluations/**/metrics.json`，导出：
+
+* `metrics_summary.csv`
+* `mean_ic_comparison.png`
+* `mean_rank_ic_comparison.png`
+* `mae_comparison.png`
+* `metrics_heatmap.png`
+
+如果只想比较测试集：
+
+```bash
+python zlab/scripts/compare_eval_metrics.py \
+  --root zlab/results/evaluations \
+  --output-dir zlab/results/evaluation_comparisons_test \
+  --splits test
+```
 
 * 比较接近的实验时，不要只凭单次结果下结论
 

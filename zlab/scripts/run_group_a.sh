@@ -11,18 +11,13 @@ fi
 
 PYTHON_BIN="${PYTHON_BIN:-$HOME/miniconda3/envs/kronos/bin/python}"
 DEVICE="${DEVICE:-auto}"
-SAMPLE_COUNT="${KRONOS_INFERENCE_SAMPLE_COUNT:-5}"
+SAMPLE_COUNT="${KRONOS_INFERENCE_SAMPLE_COUNT:-10}"
 TOPK="${KRONOS_EVAL_TOPK:-10}"
-RUN_TAG="h${HORIZON}_sc${SAMPLE_COUNT}_topk${TOPK}_t${KRONOS_INFERENCE_T:-0.6}_tp${KRONOS_INFERENCE_TOP_P:-0.9}"
 export KRONOS_PREDICT_WINDOW="$HORIZON"
 export KRONOS_DATASET_PATH="${KRONOS_DATASET_PATH_BASE:-$ROOT/zlab/results/processed_datasets}/h${HORIZON}"
 RESULT_SAVE_PATH="${KRONOS_EVAL_RESULT_PATH_BASE:-$ROOT/zlab/results/evaluations}/h${HORIZON}"
 RESULT_NAME_BASE="${RESULT_NAME:-group_a}"
-if [[ "$RESULT_NAME_BASE" == *"${RUN_TAG}" ]]; then
-  RESULT_NAME="$RESULT_NAME_BASE"
-else
-  RESULT_NAME="${RESULT_NAME_BASE}_${RUN_TAG}"
-fi
+RESULT_NAME="$RESULT_NAME_BASE"
 RUN_DIR="$RESULT_SAVE_PATH/$RESULT_NAME"
 LOG_PATH="$RUN_DIR/inference.log"
 
@@ -45,5 +40,6 @@ mkdir -p "$RUN_DIR"
     --pred-len "$HORIZON" \
     --sample-count "$SAMPLE_COUNT" \
     --batch-size "${KRONOS_EVAL_BATCH_SIZE:-128}" \
-    --topk "$TOPK"
+    --topk "$TOPK" \
+    --splits test
 } 2>&1 | tee "$LOG_PATH"

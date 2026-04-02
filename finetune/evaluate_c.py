@@ -41,7 +41,7 @@ def parse_args():
     parser.add_argument("--result-name", type=str, required=True)
     parser.add_argument("--pred-len", type=int)
     parser.add_argument("--hourly-window", type=int, default=25)
-    parser.add_argument("--sample-count", type=int, default=5)
+    parser.add_argument("--sample-count", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=64,
                         help="Inference batch size (may need to be smaller than AB due to hourly context).")
     parser.add_argument("--topk", type=int, default=10)
@@ -156,7 +156,7 @@ def _c_auto_regressive_inference(
     tokenizer, model, x, x_stamp, y_stamp,
     x_hourly, x_stamp_h,
     max_context, pred_len, clip=5,
-    T=1.0, top_k=0, top_p=0.99, sample_count=5,
+    T=1.0, top_k=0, top_p=0.99, sample_count=10,
 ):
     """
     Auto-regressive inference for C-group model.

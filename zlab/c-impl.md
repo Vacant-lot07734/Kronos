@@ -136,10 +136,12 @@
 * predictor 后 `1/3` 训练
 * `hourly_encoder / fusion` 训练
 * 主损失仍为 `future-only token CE`
-* 每个 epoch 同时计算 `val loss` 与 `val mean_rank_ic`
-* 同时保存 `best_model_by_loss` 与 `best_model_by_rankic`
+* 每个 epoch 只计算 `val loss`
+* 每个 epoch 额外保存一份 epoch checkpoint
+* `best_model_by_loss` 在线按 `val loss` 更新
+* `best_model_by_rankic` 在训练结束后统一扫验证集选出
 
-当前仍然与 B 组保持同一训练协议，但已经额外保留 `RankIC` 选模路径，便于直接对比两种 checkpoint。
+当前仍然与 B 组保持同一训练协议，但把 `RankIC` 选模挪到了训练后统一执行，避免训练期逐轮推理。
 
 ## 6. 评估逻辑
 
@@ -160,7 +162,7 @@
 * `dataset.py` 和 `dataset_c.py` 的验证集采样改为按 `idx` 取样，避免验证阶段随机抽样导致的不稳定
 * `train_predictor_c.py` 中原来失效的 `setdefault(...)` 默认配置逻辑已改正，只有在环境变量未显式设置时才回落到 C 组默认值
 * `hourly_fusion.py` 不再复用带 RoPE 的 cross-attention，改为普通 cross-attention，修复 `q_len != k_len` 时的 shape mismatch
-* `train_predictor_c.py` 现在会同时按 `val loss` 与 `val mean_rank_ic` 保存两套 checkpoint
+* `train_predictor_c.py` 现在改为训练期只看 `val loss`，训练结束后再统一扫描 epoch checkpoint 生成 `best_model_by_rankic`
 
 ## 8. 当前实现约束
 

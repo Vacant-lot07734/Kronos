@@ -112,12 +112,19 @@ A/B 环境默认还开启：
 当前 B/C 都是：
 
 * 训练主损失：`future-only token loss`
-* 每个 epoch 同时计算：`val loss` 与 `val mean_rank_ic`
-* checkpoint 同时保存：
+* 每个 epoch 只计算：`val loss`
+* 每个 epoch 都会额外保存一份 epoch checkpoint 到 `checkpoints/epochs/`
+* checkpoint 最终保存为：
   * `checkpoints/best_model_by_loss`
   * `checkpoints/best_model_by_rankic`
 * `checkpoints/best_model` 保留为 `best_model_by_loss` 的兼容别名
 * 最终对比指标：`RankIC / IC / DA / MAE / RMSE / top-k / long-short`
+
+其中：
+
+* `best_model_by_loss` 由训练期在线按 `val loss` 维护
+* `best_model_by_rankic` 由训练结束后统一扫描 epoch checkpoint，在验证集上按 `mean_rank_ic` 选择
+* 测试集只在训练完成后推理两次，分别对应 `cross-entropy/` 与 `rankIc/` 两条路径
 
 因此当前实验结论应解释为：
 
@@ -149,13 +156,24 @@ C 组在现有 Kronos predictor 外新增：
 
 当前训练和评估日志会自动落盘：
 
-* A 组推理日志：`zlab/results/evaluations/h*/<result_name_with_suffix>/inference.log`
+* A 组推理日志：`zlab/results/evaluations/h*/<result_name>/inference.log`
 * B 组训练日志：`zlab/results/models/h*/<save_folder>/train.log`
-* B 组推理日志：`zlab/results/evaluations/h*/<result_name_with_suffix>/inference.log`
+* B 组推理日志：`zlab/results/evaluations/h*/<result_name>/inference.log`
 * C 组训练日志：`zlab/results/models/h*/<save_folder>/train.log`
-* C 组推理日志：`zlab/results/evaluations/h*/<result_name_with_suffix>/inference.log`
+* C 组推理日志：`zlab/results/evaluations/h*/<result_name>/inference.log`
 
-当前 runner 还会自动追加参数后缀，避免不同 `pred_len`、不同训练参数或不同 checkpoint 选模路径互相覆盖。
+当前默认目录名是参数化的：
+
+* A：`group_a`
+* B：`group_b_lr{lr}_e{epochs}_bs{batch}`
+* C：`group_c_hlr{hourly_lr}_lr{predictor_lr}_e{epochs}_bs{batch}`
+
+其中 B/C 结果目录下固定再分：
+
+* `cross-entropy/`
+* `rankIc/`
+
+当前实验默认推理采样数为 `10`，对应环境变量 `KRONOS_INFERENCE_SAMPLE_COUNT=10`。
 
 TensorBoard 默认开启，本地目录为：
 

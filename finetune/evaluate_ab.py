@@ -22,7 +22,7 @@ def parse_args():
     parser.add_argument("--result-save-path", type=str, required=True, help="Root directory where evaluation outputs are written.")
     parser.add_argument("--result-name", type=str, required=True, help="Subdirectory name for this evaluation run.")
     parser.add_argument("--pred-len", type=int, help="Override predict window during evaluation.")
-    parser.add_argument("--sample-count", type=int, default=5, help="Sampling count averaged inside Kronos predictor.")
+    parser.add_argument("--sample-count", type=int, default=10, help="Sampling count averaged inside Kronos predictor.")
     parser.add_argument("--batch-size", type=int, default=128, help="Inference batch size in window units.")
     parser.add_argument("--topk", type=int, default=10, help="Top-k size for return proxy statistics.")
     parser.add_argument("--splits", nargs="+", default=["val", "test"], choices=["val", "test"], help="Dataset splits to evaluate.")

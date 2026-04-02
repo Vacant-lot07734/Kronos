@@ -16,6 +16,7 @@ Usage:
 import os
 import sys
 import json
+import shutil
 import time
 import argparse
 from time import gmtime, strftime
@@ -202,7 +203,7 @@ def evaluate_val_rankic(model: KronosWithHourly, tokenizer: KronosTokenizer, dev
         pred_len=config["predict_window"],
         hourly_window=config["hourly_window"],
         batch_size=config.get("eval_batch_size", 128),
-        sample_count=config.get("inference_sample_count", 5),
+        sample_count=config.get("inference_sample_count", 10),
         temperature=config.get("inference_T", 0.6),
         top_k=config.get("inference_top_k", 0),
         top_p=config.get("inference_top_p", 0.9),
@@ -244,13 +245,109 @@ def save_loss_checkpoint(model: DDP, config: dict, save_dir: str):
         _write_c_config(model, config, ckpt_dir)
 
 
-def save_rankic_checkpoint(model: DDP, config: dict, save_dir: str):
-    ckpt_dir = f"{save_dir}/checkpoints/best_model_by_rankic"
+def save_epoch_checkpoint(model: DDP, config: dict, save_dir: str, epoch_idx: int):
+    ckpt_dir = f"{save_dir}/checkpoints/epochs/epoch_{epoch_idx:03d}"
     model.module.save_all(ckpt_dir)
     _write_c_config(model, config, ckpt_dir)
 
 
-def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_size, val_rankic_context=None):
+def copy_checkpoint_dir(src_dir: str, dst_dir: str):
+    if os.path.exists(dst_dir):
+        shutil.rmtree(dst_dir)
+    shutil.copytree(src_dir, dst_dir)
+
+
+def select_rankic_checkpoint(
+    tokenizer: KronosTokenizer,
+    device,
+    config: dict,
+    save_dir: str,
+    logger,
+) -> dict:
+    eval_context = build_val_rankic_context(config)
+    epoch_root = os.path.join(save_dir, "checkpoints", "epochs")
+    if not os.path.isdir(epoch_root):
+        return {
+            "best_val_rank_ic": None,
+            "best_val_rank_ic_epoch": None,
+            "rankic_selection_records": [],
+        }
+
+    epoch_dirs = sorted(
+        path for path in os.listdir(epoch_root)
+        if path.startswith("epoch_") and os.path.isdir(os.path.join(epoch_root, path))
+    )
+    best_rank_ic = float("-inf")
+    best_epoch = None
+    best_epoch_dir = None
+    selection_records = []
+
+    print(f"Selecting RankIC checkpoint from {len(epoch_dirs)} epoch checkpoints...")
+    for epoch_name in epoch_dirs:
+        epoch_dir = os.path.join(epoch_root, epoch_name)
+        with open(os.path.join(epoch_dir, "c_config.json"), "r", encoding="utf-8") as f:
+            c_meta = json.load(f)
+        candidate = KronosWithHourly.load_for_inference(
+            kronos_predictor_path=os.path.join(epoch_dir, "kronos_predictor"),
+            c_modules_dir=epoch_dir,
+            hourly_encoder_kwargs={
+                "d_in": c_meta["d_in"],
+                "d_model": c_meta["d_model"],
+                "n_heads": c_meta["hourly_n_heads"],
+                "ff_dim": c_meta["hourly_ff_dim"],
+                "n_layers": c_meta["hourly_encoder_layers"],
+                "ffn_dropout_p": c_meta["hourly_dropout"],
+                "attn_dropout_p": 0.0,
+                "resid_dropout_p": c_meta["hourly_dropout"],
+            },
+            fusion_kwargs={
+                "d_model": c_meta["d_model"],
+                "n_heads": c_meta["fusion_n_heads"],
+                "attn_dropout_p": 0.0,
+                "resid_dropout_p": c_meta["fusion_dropout"],
+            },
+            split_point=c_meta["split_point"],
+            device=str(device),
+        )
+        summary = evaluate_val_rankic(candidate, tokenizer, device, config, eval_context)
+        rank_ic = summary.get("mean_rank_ic")
+        epoch_num = int(epoch_name.split("_")[-1])
+        selection_records.append({
+            "epoch": epoch_num,
+            "checkpoint": epoch_dir,
+            "mean_rank_ic": rank_ic,
+            "mean_ic": summary.get("mean_ic"),
+            "rank_ic_ir": summary.get("rank_ic_ir"),
+        })
+        if _metric_is_valid(rank_ic) and rank_ic > best_rank_ic:
+            best_rank_ic = float(rank_ic)
+            best_epoch = epoch_num
+            best_epoch_dir = epoch_dir
+        del candidate
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    if best_epoch_dir is not None:
+        copy_checkpoint_dir(best_epoch_dir, f"{save_dir}/checkpoints/best_model_by_rankic")
+        print(
+            f"Best RankIC model saved to {save_dir}/checkpoints/best_model_by_rankic "
+            f"(Epoch {best_epoch}, Val mean RankIC: {best_rank_ic:.4f})"
+        )
+        if logger:
+            logger.log_model("best_model_by_rankic", f"{save_dir}/checkpoints/best_model_by_rankic")
+            logger.log_metric("best_val_rank_ic", best_rank_ic, step=0, tb_tag="c/val/best_rank_ic")
+
+    with open(os.path.join(save_dir, "rankic_selection.json"), "w", encoding="utf-8") as f:
+        json.dump(selection_records, f, indent=2)
+
+    return {
+        "best_val_rank_ic": best_rank_ic if _metric_is_valid(best_rank_ic) else None,
+        "best_val_rank_ic_epoch": best_epoch,
+        "rankic_selection_records": selection_records,
+    }
+
+
+def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_size):
     start_time = time.time()
     if rank == 0:
         eff_bs = config["batch_size"] * world_size
@@ -269,8 +366,6 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
 
     best_val_loss = float("inf")
     best_val_loss_epoch = None
-    best_val_rank_ic = float("-inf")
-    best_val_rank_ic_epoch = None
     batch_idx_global = 0
 
     for epoch in range(config["epochs"]):
@@ -356,32 +451,14 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
         dist.all_reduce(vn_tensor, op=dist.ReduceOp.SUM)
         avg_val_loss = vl_tensor.item() / vn_tensor.item() if vn_tensor.item() > 0 else 0
 
-        val_rankic_summary = None
-        val_mean_rank_ic = None
-        if rank == 0 and val_rankic_context is not None:
-            val_rankic_summary = evaluate_val_rankic(model.module, tokenizer, device, config, val_rankic_context)
-            val_mean_rank_ic = val_rankic_summary.get("mean_rank_ic")
-
         if rank == 0:
             print(f"\n--- Epoch {epoch+1}/{config['epochs']} Summary ---")
             print(f"Validation Loss: {avg_val_loss:.4f}")
-            if _metric_is_valid(val_mean_rank_ic):
-                print(f"Validation mean RankIC: {val_mean_rank_ic:.4f}")
-            else:
-                print("Validation mean RankIC: None")
             print(f"Time This Epoch: {format_time(time.time() - epoch_start)}")
             print(f"Total Time Elapsed: {format_time(time.time() - start_time)}\n")
+            save_epoch_checkpoint(model, config, save_dir, epoch + 1)
             if logger:
                 logger.log_metric("val_loss_epoch", avg_val_loss, epoch=epoch, tb_tag="c/val/loss")
-                if val_rankic_summary is not None:
-                    for key, tb_tag in (
-                        ("mean_rank_ic", "c/val/mean_rank_ic"),
-                        ("mean_ic", "c/val/mean_ic"),
-                        (f"long_short_top{config.get('eval_topk', 10)}_mean_return", "c/val/long_short_mean_return"),
-                    ):
-                        value = val_rankic_summary.get(key)
-                        if _metric_is_valid(value):
-                            logger.log_metric(key, value, epoch=epoch, tb_tag=tb_tag)
 
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
@@ -394,24 +471,11 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
                 if logger:
                     logger.log_model("best_model_by_loss", f"{save_dir}/checkpoints/best_model_by_loss")
 
-            if _metric_is_valid(val_mean_rank_ic) and val_mean_rank_ic > best_val_rank_ic:
-                best_val_rank_ic = float(val_mean_rank_ic)
-                best_val_rank_ic_epoch = epoch + 1
-                save_rankic_checkpoint(model, config, save_dir)
-                print(
-                    f"Best RankIC model saved to {save_dir}/checkpoints/best_model_by_rankic "
-                    f"(Val mean RankIC: {best_val_rank_ic:.4f})"
-                )
-                if logger:
-                    logger.log_model("best_model_by_rankic", f"{save_dir}/checkpoints/best_model_by_rankic")
-
         dist.barrier()
 
     return {
         "best_val_loss": best_val_loss,
         "best_val_loss_epoch": best_val_loss_epoch,
-        "best_val_rank_ic": best_val_rank_ic if _metric_is_valid(best_val_rank_ic) else None,
-        "best_val_rank_ic_epoch": best_val_rank_ic_epoch,
     }
 
 
@@ -425,6 +489,10 @@ def main(config: dict):
     logger, summary = None, {}
     if rank == 0:
         os.makedirs(os.path.join(save_dir, "checkpoints"), exist_ok=True)
+        epoch_ckpt_dir = os.path.join(save_dir, "checkpoints", "epochs")
+        if os.path.isdir(epoch_ckpt_dir):
+            shutil.rmtree(epoch_ckpt_dir)
+        os.makedirs(epoch_ckpt_dir, exist_ok=True)
         summary = {
             "start_time": strftime("%Y-%m-%dT%H-%M-%S", gmtime()),
             "save_directory": save_dir,
@@ -452,14 +520,16 @@ def main(config: dict):
         print(f"Total Parameters: {total_params:,}")
         print(f"Trainable Parameters: {trainable_params:,}")
 
-    val_rankic_context = None
-    if rank == 0:
-        val_rankic_context = build_val_rankic_context(config)
-        print(f"Validation RankIC windows: {len(val_rankic_context['windows'])}")
+    result = train_model(model, tokenizer, device, config, save_dir, logger, rank, world_size)
 
     dist.barrier()
-
-    result = train_model(model, tokenizer, device, config, save_dir, logger, rank, world_size, val_rankic_context)
+    if rank == 0:
+        rankic_result = select_rankic_checkpoint(tokenizer, device, config, save_dir, logger)
+        result.update({
+            "best_val_rank_ic": rankic_result["best_val_rank_ic"],
+            "best_val_rank_ic_epoch": rankic_result["best_val_rank_ic_epoch"],
+        })
+    dist.barrier()
 
     if rank == 0:
         summary["result"] = result
@@ -468,8 +538,6 @@ def main(config: dict):
         print("Training finished. Summary saved.")
         if logger:
             logger.log_metric("best_val_loss", result["best_val_loss"], step=0, tb_tag="c/val/best_loss")
-            if _metric_is_valid(result.get("best_val_rank_ic")):
-                logger.log_metric("best_val_rank_ic", result["best_val_rank_ic"], step=0, tb_tag="c/val/best_rank_ic")
             logger.close()
 
     cleanup_ddp()

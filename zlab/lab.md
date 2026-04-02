@@ -130,12 +130,13 @@ B/C 的主训练目标保持一致：
 当前仓库中的 B/C 实现仍然采用：
 
 * 训练主损失：`future-only token loss`
-* 每个 epoch 同时计算：`val loss` 与 `val mean RankIC`
-* checkpoint 同时保存：`best_model_by_loss` 与 `best_model_by_rankic`
+* 每个 epoch 只计算：`val loss`
+* 每个 epoch 保存一份 epoch checkpoint
+* 训练结束后统一在验证集扫描这些 checkpoint，再生成：`best_model_by_loss` 与 `best_model_by_rankic`
 
 因此当前跑出的结果应理解为：
 
-* 在统一训练目标下，同时比较 `loss` 选模路径与 `RankIC` 选模路径的下游金融指标
+* 在统一训练目标下，同时比较 `loss` 选模路径与训练后 `RankIC` 选模路径的下游金融指标
 
 而不是：
 

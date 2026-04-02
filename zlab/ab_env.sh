@@ -58,6 +58,7 @@ export KRONOS_TRAIN_TIME_EMBEDDING="false"
 export KRONOS_SKIP_TOKENIZER_FINETUNE="true"
 export KRONOS_EVAL_BATCH_SIZE="128"
 export KRONOS_EVAL_TOPK="10"
+export KRONOS_INFERENCE_SAMPLE_COUNT="10"
 export KRONOS_EVAL_ONLY="${KRONOS_EVAL_ONLY:-false}"
 
 # -------------------------------------------------------------------
@@ -73,11 +74,11 @@ export KRONOS_EVAL_RESULT_PATH_BASE="$KRONOS_RESULTS_ROOT/evaluations"
 # Uncomment only when needed. These values are reset on each `source`.
 # -------------------------------------------------------------------
 # export KRONOS_EVAL_ONLY="false"  # true: skip training and only run evaluation
-# export KRONOS_PREDICTOR_LR="2e-5"  # predictor learning rate
-# export KRONOS_BATCH_SIZE="32"  # per-GPU batch size
-# export KRONOS_EPOCHS="10"  # total training epochs
-# export KRONOS_PREDICTOR_SAVE_FOLDER_NAME="group_b_predictor"  # model dir prefix; runner appends parameter suffix
-# export RESULT_NAME="group_b"  # evaluation dir prefix; runner appends parameter suffix and checkpoint marker
+# export KRONOS_PREDICTOR_LR="1e-5"  # predictor learning rate
+# export KRONOS_BATCH_SIZE="64"  # per-GPU batch size
+# export KRONOS_EPOCHS="15"  # total training epochs
+# export KRONOS_PREDICTOR_SAVE_FOLDER_NAME="group_b_lr1e5_e10_bs64"  # exact model dir name; unset to use script default naming
+# export RESULT_NAME="group_b_lr1e5_e10_bs64"  # exact evaluation dir name; results are written under cross-entropy/ and rankIc/
 
 # -------------------------------------------------------------------
 # Optional overrides for group C
@@ -88,7 +89,21 @@ export KRONOS_EVAL_RESULT_PATH_BASE="$KRONOS_RESULTS_ROOT/evaluations"
 # export KRONOS_HOURLY_LR="1e-4"  # learning rate for hourly encoder + fusion
 # export KRONOS_HOURLY_ENCODER_LAYERS="2"  # depth of hourly encoder
 # export KRONOS_PREDICTOR_LR="5e-5"  # learning rate for the trainable Kronos upper layers
-# export KRONOS_BATCH_SIZE="32"  # per-GPU batch size
-# export KRONOS_EPOCHS="15"  # C often needs a different epoch count than B
-# export KRONOS_PREDICTOR_SAVE_FOLDER_NAME="group_c_predictor"  # model dir prefix; runner appends parameter suffix
-# export RESULT_NAME="group_c"  # evaluation dir prefix; runner appends parameter suffix and checkpoint marker
+# export KRONOS_BATCH_SIZE="64"  # per-GPU batch size
+# export KRONOS_EPOCHS="10"  # total training epochs
+# export KRONOS_PREDICTOR_SAVE_FOLDER_NAME="group_c_hlr1e4_lr5e5_e10_bs64"  # exact model dir name; unset to use script default naming
+# export RESULT_NAME="group_c_hlr1e4_lr5e5_e10_bs64"  # exact evaluation dir name; results are written under cross-entropy/ and rankIc/
+
+# -------------------------------------------------------------------
+# Optional overrides for sequential C-group sweep
+# `run_group_c_sweep.sh` reads these after sourcing this file once.
+# -------------------------------------------------------------------
+# export KRONOS_C_SWEEP_HORIZONS="1 5"  # sweep horizons in sequence; CLI args override this
+# export KRONOS_C_SWEEP_PRED_LRS="5e-5 3e-5 2e-5"
+# export KRONOS_C_SWEEP_HOURLY_LRS="1e-4 5e-5"
+# export KRONOS_C_SWEEP_BATCH_SIZES="64"
+# export KRONOS_C_SWEEP_EPOCHS_LIST="10 15"
+# export KRONOS_C_SWEEP_HOURLY_WINDOWS="25"
+# export KRONOS_C_SWEEP_ENCODER_LAYERS="2"
+# export KRONOS_C_SWEEP_PREPARE_DATA="false"  # set true when hourly_window changes or C data must be rebuilt
+# export KRONOS_C_SWEEP_CONTINUE_ON_ERROR="false"  # set true to continue after a failed run

@@ -3,8 +3,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HORIZON="${1:-${HORIZON:-1}}"
+AUTO_SOURCE_ENV="${KRONOS_AUTO_SOURCE_ENV:-true}"
 
-if [[ -f "$ROOT/zlab/ab_env.sh" ]]; then
+if [[ "${AUTO_SOURCE_ENV,,}" != "false" && -f "$ROOT/zlab/ab_env.sh" ]]; then
+  # shellcheck disable=SC1091
   source "$ROOT/zlab/ab_env.sh"
 fi
 
