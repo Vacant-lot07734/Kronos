@@ -214,6 +214,7 @@ bash zlab/scripts/run_group_c_sweep.sh
 * 同时保存每个 epoch 的 checkpoint 到 `checkpoints/epochs/`
 * 训练结束后，再统一在验证集上扫描这些 epoch checkpoint
 * 验证集 `mean_rank_ic` 最优的那个 epoch 会被复制为 `best_model_by_rankic`
+* 默认会在选完 `best_model_by_rankic` 后删除 `checkpoints/epochs/`，只保留最终两份 best checkpoint；如需保留全部 epoch 模型，设 `KRONOS_CLEANUP_EPOCH_CHECKPOINTS=false`
 * 测试集只在训练完成后推理两次：一次 `cross-entropy`，一次 `rankIc`
 
 所以训练阶段首先看：
@@ -360,13 +361,34 @@ python zlab/scripts/compare_eval_metrics.py \
   --output-dir zlab/results/evaluation_comparisons
 ```
 
+默认只比较 `pred_len=1`。如果要只生成 `pred_len=5` 的图，直接在命令最后加 `5`：
+
+```bash
+python zlab/scripts/compare_eval_metrics.py 5 \
+  --root zlab/results/evaluations \
+  --output-dir zlab/results/evaluation_comparisons
+```
+
 默认会递归读取 `zlab/results/evaluations/**/metrics.json`，导出：
 
-* `metrics_summary.csv`
-* `mean_ic_comparison.png`
-* `mean_rank_ic_comparison.png`
-* `mae_comparison.png`
-* `metrics_heatmap.png`
+* `metrics_summary_all.csv`
+* `metrics_summary_selected.csv`
+* `all_rank_ic1.png`
+* `all_ic1.png`
+* `all_ic_ir1.png`
+* `all_mae1.png`
+* `selected_rank_ic1.png`
+* `selected_ic1.png`
+* `selected_ic_ir1.png`
+* `selected_mae1.png`
+
+其中：
+
+* `all_*.png` 包含当前筛选条件下的全部实验
+* `selected_*.png` 只保留 `group_a` 与“优秀的 B/C 实验”
+* “优秀的 B/C 实验”定义为：某个 B/C 结果在任一指标下进入前三名，就会参与全部四个指标的子图比较
+* 所有图都使用同一固定顺序，便于直接对照不同指标
+* 图中的 `ic` 直接对应原始 `metrics.json` 里的 `mean_ic` 字段
 
 如果只想比较测试集：
 

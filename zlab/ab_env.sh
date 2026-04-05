@@ -11,6 +11,7 @@ unset KRONOS_EVAL_MODEL_HORIZON
 unset KRONOS_HOURLY_WINDOW
 unset KRONOS_HOURLY_LR
 unset KRONOS_HOURLY_ENCODER_LAYERS
+unset KRONOS_CLEANUP_EPOCH_CHECKPOINTS
 
 # -------------------------------------------------------------------
 # Python / device
@@ -60,6 +61,7 @@ export KRONOS_EVAL_BATCH_SIZE="128"
 export KRONOS_EVAL_TOPK="10"
 export KRONOS_INFERENCE_SAMPLE_COUNT="10"
 export KRONOS_EVAL_ONLY="${KRONOS_EVAL_ONLY:-false}"
+export KRONOS_CLEANUP_EPOCH_CHECKPOINTS="${KRONOS_CLEANUP_EPOCH_CHECKPOINTS:-true}"
 
 # -------------------------------------------------------------------
 # Output roots
@@ -79,6 +81,7 @@ export KRONOS_EVAL_RESULT_PATH_BASE="$KRONOS_RESULTS_ROOT/evaluations"
 # export KRONOS_EPOCHS="15"  # total training epochs
 # export KRONOS_PREDICTOR_SAVE_FOLDER_NAME="group_b_lr1e5_e10_bs64"  # exact model dir name; unset to use script default naming
 # export RESULT_NAME="group_b_lr1e5_e10_bs64"  # exact evaluation dir name; results are written under cross-entropy/ and rankIc/
+# export KRONOS_CLEANUP_EPOCH_CHECKPOINTS="false"  # keep checkpoints/epochs/ for manual inspection
 
 # -------------------------------------------------------------------
 # Optional overrides for group C
@@ -93,6 +96,7 @@ export KRONOS_EVAL_RESULT_PATH_BASE="$KRONOS_RESULTS_ROOT/evaluations"
 # export KRONOS_EPOCHS="10"  # total training epochs
 # export KRONOS_PREDICTOR_SAVE_FOLDER_NAME="group_c_hlr1e4_lr5e5_e10_bs64"  # exact model dir name; unset to use script default naming
 # export RESULT_NAME="group_c_hlr1e4_lr5e5_e10_bs64"  # exact evaluation dir name; results are written under cross-entropy/ and rankIc/
+# export KRONOS_CLEANUP_EPOCH_CHECKPOINTS="false"  # keep checkpoints/epochs/ for manual inspection
 
 # -------------------------------------------------------------------
 # Optional overrides for sequential C-group sweep

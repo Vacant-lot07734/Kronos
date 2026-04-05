@@ -257,6 +257,18 @@ def copy_checkpoint_dir(src_dir: str, dst_dir: str):
     shutil.copytree(src_dir, dst_dir)
 
 
+def cleanup_epoch_checkpoints(save_dir: str, enabled: bool) -> bool:
+    epoch_root = os.path.join(save_dir, "checkpoints", "epochs")
+    if not enabled:
+        print(f"Keeping epoch checkpoints at {epoch_root}")
+        return False
+    if not os.path.isdir(epoch_root):
+        return False
+    shutil.rmtree(epoch_root)
+    print(f"Removed temporary epoch checkpoints: {epoch_root}")
+    return True
+
+
 def select_rankic_checkpoint(
     tokenizer: KronosTokenizer,
     device,
@@ -529,6 +541,10 @@ def main(config: dict):
             "best_val_rank_ic": rankic_result["best_val_rank_ic"],
             "best_val_rank_ic_epoch": rankic_result["best_val_rank_ic_epoch"],
         })
+        result["epoch_checkpoints_removed"] = cleanup_epoch_checkpoints(
+            save_dir,
+            config.get("cleanup_epoch_checkpoints", True),
+        )
     dist.barrier()
 
     if rank == 0:

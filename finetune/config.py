@@ -138,6 +138,7 @@ class Config:
         self.tokenizer_save_folder_name = _get_env_str("KRONOS_TOKENIZER_SAVE_FOLDER_NAME", "finetune_tokenizer_demo")
         self.predictor_save_folder_name = _get_env_str("KRONOS_PREDICTOR_SAVE_FOLDER_NAME", "finetune_predictor_demo")
         self.backtest_save_folder_name = _get_env_str("KRONOS_BACKTEST_SAVE_FOLDER_NAME", "finetune_backtest_demo")
+        self.cleanup_epoch_checkpoints = _get_env_bool("KRONOS_CLEANUP_EPOCH_CHECKPOINTS", True)
 
         # Path for backtesting results.
         self.backtest_result_path = _expand_path(_get_env_str("KRONOS_BACKTEST_RESULT_PATH", "./outputs/backtest_results"))

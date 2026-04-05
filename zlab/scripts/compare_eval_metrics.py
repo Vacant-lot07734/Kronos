@@ -3,28 +3,49 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.patches import Patch
 
 
-DEFAULT_METRICS = ["mean_ic", "mean_rank_ic", "mae"]
+DEFAULT_METRICS = ["mean_rank_ic", "mean_ic", "rank_ic_ir", "mae"]
+METRIC_COLUMN_MAP = {
+    "mean_rank_ic": "mean_rank_ic",
+    "mean_ic": "mean_ic",
+    "rank_ic_ir": "rank_ic_ir",
+    "mae": "mae",
+}
+METRIC_TITLES = {
+    "mean_rank_ic": "rank_ic",
+    "mean_ic": "ic",
+    "rank_ic_ir": "ic_ir",
+    "mae": "mae",
+}
+LOWER_IS_BETTER = {"mae"}
 SELECTION_ORDER = {"default": 0, "cross-entropy": 1, "rankIc": 2}
 SPLIT_ORDER = {"val": 0, "test": 1}
 GROUP_ORDER = {"group_a": 0, "group_b": 1, "group_c": 2}
-METRIC_TITLES = {
-    "mean_ic": "Mean IC",
-    "mean_rank_ic": "Mean RankIC",
-    "mae": "MAE",
+GROUP_COLORS = {
+    "group_a": "#4C78A8",
+    "group_b": "#59A14F",
+    "group_c": "#F28E2B",
+    "other": "#9C9C9C",
 }
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Aggregate experiment metrics.json files and generate comparison plots."
+        description="Aggregate evaluation metrics and generate fixed-order comparison plots."
+    )
+    parser.add_argument(
+        "pred_len",
+        nargs="?",
+        default="1",
+        choices=["1", "5"],
+        help="Prediction horizon to compare. Default: 1",
     )
     parser.add_argument(
         "--root",
@@ -42,7 +63,7 @@ def parse_args():
         "--metrics",
         nargs="+",
         default=DEFAULT_METRICS,
-        help="Metrics to compare. Default: mean_ic mean_rank_ic mae",
+        help="Metrics to compare. Default: mean_rank_ic mean_ic rank_ic_ir mae",
     )
     parser.add_argument(
         "--splits",
@@ -54,7 +75,7 @@ def parse_args():
         "--horizons",
         nargs="*",
         default=None,
-        help="Optional horizon filter, e.g. h1 h5.",
+        help="Optional explicit horizon filter. When omitted, pred_len controls the filter.",
     )
     return parser.parse_args()
 
@@ -112,9 +133,15 @@ def load_metrics(root: Path) -> pd.DataFrame:
     df["group_order"] = df["group"].map(GROUP_ORDER).fillna(99)
     df["split_order"] = df["split"].map(SPLIT_ORDER).fillna(99)
     df["selection_order"] = df["selection"].map(SELECTION_ORDER).fillna(99)
-    return df.sort_values(
+    df = df.sort_values(
         ["horizon_num", "split_order", "group_order", "run_name", "selection_order", "label"]
     ).reset_index(drop=True)
+    df["display_label"] = df.apply(
+        lambda row: f"{row['label']} ({row['horizon'].upper()} | {row['split']})",
+        axis=1,
+    )
+    df["display_order"] = np.arange(len(df))
+    return df
 
 
 def apply_filters(df: pd.DataFrame, splits: list[str] | None, horizons: list[str] | None) -> pd.DataFrame:
@@ -123,10 +150,17 @@ def apply_filters(df: pd.DataFrame, splits: list[str] | None, horizons: list[str
         filtered = filtered[filtered["split"].isin(splits)]
     if horizons:
         filtered = filtered[filtered["horizon"].isin(horizons)]
-    return filtered.reset_index(drop=True)
+    filtered = filtered.sort_values("display_order").reset_index(drop=True)
+    return filtered
 
 
-def save_summary(df: pd.DataFrame, output_dir: Path, metrics: list[str]):
+def validate_metrics(metrics: list[str]):
+    unknown = [metric for metric in metrics if metric not in METRIC_COLUMN_MAP]
+    if unknown:
+        raise ValueError(f"Unsupported metrics: {unknown}")
+
+
+def save_summary(df: pd.DataFrame, output_dir: Path, metrics: list[str], filename: str):
     keep_cols = [
         "horizon",
         "split",
@@ -134,116 +168,122 @@ def save_summary(df: pd.DataFrame, output_dir: Path, metrics: list[str]):
         "run_name",
         "selection",
         "label",
+        "display_label",
         "metrics_path",
     ] + metrics
     summary = df[keep_cols].copy()
-    summary.to_csv(output_dir / "metrics_summary.csv", index=False)
+    summary.to_csv(output_dir / filename, index=False)
 
 
-def sort_for_display(sub_df: pd.DataFrame) -> pd.DataFrame:
-    return sub_df.sort_values(
-        ["group_order", "run_name", "selection_order", "label"]
-    ).reset_index(drop=True)
+def select_excellent_bc(df: pd.DataFrame, metrics: list[str]) -> pd.DataFrame:
+    bc_df = df[df["group"].isin(["group_b", "group_c"])].copy()
+    selected_labels: set[str] = set()
+
+    for metric in metrics:
+        metric_df = bc_df.dropna(subset=[metric]).copy()
+        if metric_df.empty:
+            continue
+        ascending = metric in LOWER_IS_BETTER
+        metric_df = metric_df.sort_values(
+            [metric, "display_order"],
+            ascending=[ascending, True],
+        )
+        top_df = metric_df.head(2)
+        selected_labels.update(top_df["display_label"].tolist())
+
+    selected_df = df[
+        (df["group"] == "group_a") | (df["display_label"].isin(selected_labels))
+    ].copy()
+    return selected_df.sort_values("display_order").reset_index(drop=True)
 
 
-def plot_metric_panels(df: pd.DataFrame, metric: str, output_dir: Path):
-    metric_df = df.dropna(subset=[metric]).copy()
+def _value_offset(values: np.ndarray) -> float:
+    if values.size == 0:
+        return 0.001
+    span = float(np.nanmax(np.abs(values)))
+    return max(span * 0.02, 0.0005)
+
+
+def plot_metric(df: pd.DataFrame, metric: str, output_path: Path, title_prefix: str):
+    metric_df = df.dropna(subset=[metric]).sort_values("display_order").reset_index(drop=True)
     if metric_df.empty:
         return
 
-    combos = list(metric_df[["horizon", "split"]].drop_duplicates().itertuples(index=False, name=None))
-    n_panels = len(combos)
-    fig_h = max(4.0 * n_panels, 4.5)
-    fig, axes = plt.subplots(n_panels, 1, figsize=(13, fig_h), squeeze=False)
-    axes = axes.flatten()
+    values = metric_df[metric].to_numpy(dtype=float)
+    labels = metric_df["display_label"].tolist()
+    colors = [GROUP_COLORS.get(group, GROUP_COLORS["other"]) for group in metric_df["group"]]
 
-    for ax, (horizon, split) in zip(axes, combos):
-        panel = metric_df[(metric_df["horizon"] == horizon) & (metric_df["split"] == split)].copy()
-        panel = sort_for_display(panel)
+    fig_h = max(0.35 * len(metric_df) + 2.8, 5.0)
+    fig, ax = plt.subplots(figsize=(14, fig_h))
+    y_pos = np.arange(len(metric_df))
 
-        values = panel[metric].to_numpy(dtype=float)
-        labels = panel["label"].tolist()
-        colors = (
-            ["#4C78A8"] * len(values)
-            if metric == "mae"
-            else ["#59A14F" if value >= 0 else "#E15759" for value in values]
-        )
+    ax.barh(y_pos, values, color=colors, alpha=0.92)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.set_title(f"{title_prefix} | {METRIC_TITLES[metric]}")
+    ax.grid(axis="x", linestyle="--", alpha=0.35)
+    if metric not in LOWER_IS_BETTER:
+        ax.axvline(0.0, color="black", linewidth=1.0, alpha=0.6)
+    ax.invert_yaxis()
 
-        y_pos = np.arange(len(panel))
-        ax.barh(y_pos, values, color=colors, alpha=0.9)
-        ax.set_yticks(y_pos)
-        ax.set_yticklabels(labels, fontsize=9)
-        ax.set_title(f"{METRIC_TITLES.get(metric, metric)} | {horizon.upper()} | {split}")
-        ax.grid(axis="x", linestyle="--", alpha=0.35)
-        if metric != "mae":
-            ax.axvline(0.0, color="black", linewidth=1.0, alpha=0.6)
-        ax.invert_yaxis()
+    offset = _value_offset(values)
+    for idx, value in enumerate(values):
+        text_x = value + offset if value >= 0 else value - offset
+        ha = "left" if value >= 0 else "right"
+        ax.text(text_x, idx, f"{value:.4f}", va="center", ha=ha, fontsize=8)
 
-        span = np.nanmax(np.abs(values)) if len(values) else 0.0
-        offset = max(span * 0.02, 0.0005)
-        for idx, value in enumerate(values):
-            text_x = value + offset if value >= 0 else value - offset
-            ha = "left" if value >= 0 else "right"
-            ax.text(text_x, idx, f"{value:.4f}", va="center", ha=ha, fontsize=8)
+    legend_handles = [
+        Patch(color=GROUP_COLORS["group_a"], label="group_a"),
+        Patch(color=GROUP_COLORS["group_b"], label="group_b"),
+        Patch(color=GROUP_COLORS["group_c"], label="group_c"),
+    ]
+    ax.legend(handles=legend_handles, loc="lower right", frameon=True)
 
     plt.tight_layout()
-    fig.savefig(output_dir / f"{metric}_comparison.png", dpi=220)
-    plt.close(fig)
-
-
-def plot_heatmap(df: pd.DataFrame, metrics: list[str], output_dir: Path):
-    heat_df = df.dropna(subset=metrics, how="all").copy()
-    if heat_df.empty:
-        return
-
-    labels = heat_df["label"].tolist()
-    row_suffix = [f"{h.upper()} | {s}" for h, s in zip(heat_df["horizon"], heat_df["split"])]
-    row_labels = [f"{label} ({suffix})" for label, suffix in zip(labels, row_suffix)]
-    values = heat_df[metrics].to_numpy(dtype=float)
-
-    fig_h = max(0.5 * len(row_labels) + 2.5, 4.5)
-    fig_w = max(2.4 * len(metrics) + 3.5, 8.0)
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-    im = ax.imshow(values, aspect="auto", cmap="RdYlGn")
-    ax.set_xticks(np.arange(len(metrics)))
-    ax.set_xticklabels([METRIC_TITLES.get(metric, metric) for metric in metrics], rotation=20, ha="right")
-    ax.set_yticks(np.arange(len(row_labels)))
-    ax.set_yticklabels(row_labels, fontsize=9)
-    ax.set_title("Evaluation Metrics Heatmap")
-
-    for i in range(values.shape[0]):
-        for j in range(values.shape[1]):
-            value = values[i, j]
-            text = "nan" if math.isnan(value) else f"{value:.4f}"
-            ax.text(j, i, text, ha="center", va="center", fontsize=8, color="black")
-
-    fig.colorbar(im, ax=ax, shrink=0.9)
-    plt.tight_layout()
-    fig.savefig(output_dir / "metrics_heatmap.png", dpi=220)
+    fig.savefig(output_path, dpi=220)
     plt.close(fig)
 
 
 def main():
     args = parse_args()
+    validate_metrics(args.metrics)
+
     root = Path(args.root).resolve()
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     df = load_metrics(root)
-    df = apply_filters(df, args.splits, args.horizons)
+    horizons = args.horizons if args.horizons else [f"h{args.pred_len}"]
+    df = apply_filters(df, args.splits, horizons)
     if df.empty:
         raise RuntimeError("No metrics remain after applying filters.")
 
-    save_summary(df, output_dir, args.metrics)
+    selected_df = select_excellent_bc(df, args.metrics)
+    suffix = args.pred_len
+
+    save_summary(df, output_dir, args.metrics, "metrics_summary_all.csv")
+    save_summary(selected_df, output_dir, args.metrics, "metrics_summary_selected.csv")
+
     for metric in args.metrics:
-        plot_metric_panels(df, metric, output_dir)
-    plot_heatmap(df, args.metrics, output_dir)
+        plot_metric(
+            df,
+            metric,
+            output_dir / f"all_{METRIC_TITLES[metric]}{suffix}.png",
+            f"all experiments | pred_len={args.pred_len}",
+        )
+        plot_metric(
+            selected_df,
+            metric,
+            output_dir / f"selected_{METRIC_TITLES[metric]}{suffix}.png",
+            f"a + selected b/c experiments | pred_len={args.pred_len}",
+        )
 
     print(f"Loaded {len(df)} metrics rows from {root}")
-    print(f"Saved summary to {output_dir / 'metrics_summary.csv'}")
+    print(f"Saved summary to {output_dir / 'metrics_summary_all.csv'}")
+    print(f"Saved summary to {output_dir / 'metrics_summary_selected.csv'}")
     for metric in args.metrics:
-        print(f"Saved figure: {output_dir / f'{metric}_comparison.png'}")
-    print(f"Saved figure: {output_dir / 'metrics_heatmap.png'}")
+        print(f"Saved figure: {output_dir / f'all_{METRIC_TITLES[metric]}{suffix}.png'}")
+        print(f"Saved figure: {output_dir / f'selected_{METRIC_TITLES[metric]}{suffix}.png'}")
 
 
 if __name__ == "__main__":

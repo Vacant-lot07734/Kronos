@@ -118,6 +118,7 @@ A/B 环境默认还开启：
   * `checkpoints/best_model_by_loss`
   * `checkpoints/best_model_by_rankic`
 * `checkpoints/best_model` 保留为 `best_model_by_loss` 的兼容别名
+* 默认在 `best_model_by_rankic` 选完后自动删除 `checkpoints/epochs/`；若要保留全部 epoch 模型，设置 `KRONOS_CLEANUP_EPOCH_CHECKPOINTS=false`
 * 最终对比指标：`RankIC / IC / DA / MAE / RMSE / top-k / long-short`
 
 其中：
