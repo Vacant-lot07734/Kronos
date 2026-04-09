@@ -87,15 +87,24 @@ def _load_hourly_df(csv_path: str, feature_list: list[str]) -> tuple[str, pd.Dat
 # Slicing
 # ---------------------------------------------------------------------------
 
-def _slice_daily_with_buffer(df: pd.DataFrame, score_start: pd.Timestamp, score_end: pd.Timestamp, lookback_window: int):
+def _slice_daily_with_prediction_buffer(
+    df: pd.DataFrame,
+    prediction_start: pd.Timestamp,
+    prediction_end: pd.Timestamp,
+    lookback_window: int,
+    predict_window: int,
+):
     if df.empty:
         return df
-    split_df = df.loc[df.index <= score_end].copy()
-    if split_df.empty:
-        return split_df
-    pos = split_df.index.searchsorted(score_start)
-    buffered_pos = max(0, pos - lookback_window)
-    return split_df.iloc[buffered_pos:]
+    start_pos = df.index.searchsorted(prediction_start, side="left")
+    if start_pos >= len(df):
+        return df.iloc[0:0].copy()
+    end_pos = df.index.searchsorted(prediction_end, side="right") - 1
+    if end_pos < start_pos:
+        return df.iloc[0:0].copy()
+    buffered_start_pos = max(0, start_pos - lookback_window)
+    buffered_end_pos = min(len(df) - 1, end_pos + predict_window - 1)
+    return df.iloc[buffered_start_pos:buffered_end_pos + 1].copy()
 
 
 def _slice_hourly(hourly_df: pd.DataFrame, daily_split_df: pd.DataFrame, hourly_window: int):
@@ -125,27 +134,15 @@ def _slice_hourly(hourly_df: pd.DataFrame, daily_split_df: pd.DataFrame, hourly_
 # Window counting
 # ---------------------------------------------------------------------------
 
-def _count_daily_windows(df, lookback_window, predict_window, score_start, score_end):
+def _count_prediction_windows(df, lookback_window, predict_window, prediction_start, prediction_end):
     window = lookback_window + predict_window + 1
     if len(df) < window:
         return 0
     count = 0
     for start_idx in range(len(df) - window + 1):
-        target_end_idx = start_idx + lookback_window + predict_window - 1
-        target_end_time = df.index[target_end_idx]
-        if score_start <= target_end_time <= score_end:
-            count += 1
-    return count
-
-
-def _count_eval_windows(df, lookback_window, predict_window, score_start, score_end):
-    min_target_end_idx = lookback_window + predict_window - 1
-    if len(df) <= min_target_end_idx:
-        return 0
-    count = 0
-    for target_end_idx in range(min_target_end_idx, len(df)):
-        target_end_time = df.index[target_end_idx]
-        if score_start <= target_end_time <= score_end:
+        prediction_start_idx = start_idx + lookback_window
+        prediction_start_time = df.index[prediction_start_idx]
+        if prediction_start <= prediction_start_time <= prediction_end:
             count += 1
     return count
 
@@ -201,9 +198,27 @@ def main():
         h_full = hourly_all[sym]
 
         # Daily splits (same logic as B group)
-        d_train = d_full.loc[(d_full.index >= train_start) & (d_full.index <= train_end)].copy()
-        d_val = _slice_daily_with_buffer(d_full, val_start, val_end, config.lookback_window)
-        d_test = _slice_daily_with_buffer(d_full, test_start, test_end, config.lookback_window)
+        d_train = _slice_daily_with_prediction_buffer(
+            d_full,
+            train_start,
+            train_end,
+            config.lookback_window,
+            config.predict_window,
+        )
+        d_val = _slice_daily_with_prediction_buffer(
+            d_full,
+            val_start,
+            val_end,
+            config.lookback_window,
+            config.predict_window,
+        )
+        d_test = _slice_daily_with_prediction_buffer(
+            d_full,
+            test_start,
+            test_end,
+            config.lookback_window,
+            config.predict_window,
+        )
 
         # Hourly splits (aligned to daily)
         h_train = _slice_hourly(h_full, d_train, hourly_window)
@@ -211,9 +226,9 @@ def main():
         h_test = _slice_hourly(h_full, d_test, hourly_window)
 
         # Check minimum windows
-        n_train_win = _count_daily_windows(d_train, config.lookback_window, config.predict_window, train_start, train_end)
-        n_val_win = _count_daily_windows(d_val, config.lookback_window, config.predict_window, val_start, val_end)
-        n_test_win = _count_eval_windows(d_test, config.lookback_window, config.predict_window, test_start, test_end)
+        n_train_win = _count_prediction_windows(d_train, config.lookback_window, config.predict_window, train_start, train_end)
+        n_val_win = _count_prediction_windows(d_val, config.lookback_window, config.predict_window, val_start, val_end)
+        n_test_win = _count_prediction_windows(d_test, config.lookback_window, config.predict_window, test_start, test_end)
 
         has_hourly = len(h_train) >= hourly_window and len(h_val) >= hourly_window and len(h_test) >= hourly_window
 
@@ -266,20 +281,20 @@ def main():
         "symbols": kept_symbols,
         "splits": {
             "train": {
-                "score_start": train_start.strftime("%Y-%m-%d"),
-                "score_end": train_end.strftime("%Y-%m-%d"),
+                "prediction_start": train_start.strftime("%Y-%m-%d"),
+                "prediction_end": train_end.strftime("%Y-%m-%d"),
                 "daily_rows_total": int(sum(len(d["daily"]) for d in train_data.values())),
                 "hourly_rows_total": int(sum(len(d["hourly"]) for d in train_data.values())),
             },
             "val": {
-                "score_start": val_start.strftime("%Y-%m-%d"),
-                "score_end": val_end.strftime("%Y-%m-%d"),
+                "prediction_start": val_start.strftime("%Y-%m-%d"),
+                "prediction_end": val_end.strftime("%Y-%m-%d"),
                 "daily_rows_total": int(sum(len(d["daily"]) for d in val_data.values())),
                 "hourly_rows_total": int(sum(len(d["hourly"]) for d in val_data.values())),
             },
             "test": {
-                "score_start": test_start.strftime("%Y-%m-%d"),
-                "score_end": test_end.strftime("%Y-%m-%d"),
+                "prediction_start": test_start.strftime("%Y-%m-%d"),
+                "prediction_end": test_end.strftime("%Y-%m-%d"),
                 "daily_rows_total": int(sum(len(d["daily"]) for d in test_data.values())),
                 "hourly_rows_total": int(sum(len(d["hourly"]) for d in test_data.values())),
             },

@@ -67,6 +67,14 @@ def _load_split_data(data_path: str, split: str) -> dict:
         return pickle.load(f)
 
 
+def _resolve_prediction_range(split_meta: dict) -> tuple[pd.Timestamp, pd.Timestamp]:
+    prediction_start = split_meta.get("prediction_start", split_meta.get("score_start"))
+    prediction_end = split_meta.get("prediction_end", split_meta.get("score_end"))
+    if prediction_start is None or prediction_end is None:
+        raise KeyError("Split metadata must define prediction_start/prediction_end.")
+    return pd.Timestamp(prediction_start), pd.Timestamp(prediction_end)
+
+
 # ---------------------------------------------------------------------------
 # Build evaluation windows (daily + hourly context)
 # ---------------------------------------------------------------------------
@@ -80,30 +88,28 @@ def _build_eval_windows(
     feature_list: list[str],
 ) -> list[dict]:
     """Build evaluation windows identical to evaluate_ab.py but with hourly context added."""
-    score_start = pd.Timestamp(split_meta["score_start"])
-    score_end = pd.Timestamp(split_meta["score_end"])
+    prediction_start, prediction_end = _resolve_prediction_range(split_meta)
 
     windows = []
     for symbol, entry in split_data.items():
         daily_df = entry["daily"].sort_index()
         hourly_df = entry["hourly"].sort_index()
 
-        min_te = lookback_window + pred_len - 1
-        if len(daily_df) <= min_te:
+        if len(daily_df) < lookback_window + pred_len:
             continue
 
-        for target_end_idx in range(min_te, len(daily_df)):
-            target_end_dt = daily_df.index[target_end_idx]
-            if target_end_dt < score_start or target_end_dt > score_end:
+        for prediction_start_idx in range(lookback_window, len(daily_df) - pred_len + 1):
+            prediction_start_dt = daily_df.index[prediction_start_idx]
+            if prediction_start_dt < prediction_start or prediction_start_dt > prediction_end:
                 continue
 
-            context_end_idx = target_end_idx - pred_len
-            context_start_idx = context_end_idx - lookback_window + 1
+            context_end_idx = prediction_start_idx - 1
+            context_start_idx = prediction_start_idx - lookback_window
             if context_start_idx < 0:
                 continue
 
             context_df = daily_df.iloc[context_start_idx:context_end_idx + 1]
-            future_df = daily_df.iloc[context_end_idx + 1:target_end_idx + 1]
+            future_df = daily_df.iloc[prediction_start_idx:prediction_start_idx + pred_len]
             if len(context_df) != lookback_window or len(future_df) != pred_len:
                 continue
 
@@ -123,7 +129,8 @@ def _build_eval_windows(
             windows.append({
                 "instrument": symbol,
                 "context_end_date": context_df.index[-1].strftime("%Y-%m-%d"),
-                "target_end_date": future_df.index[-1].strftime("%Y-%m-%d"),
+                "prediction_start_date": future_df.index[0].strftime("%Y-%m-%d"),
+                "prediction_end_date": future_df.index[-1].strftime("%Y-%m-%d"),
                 "context_df": model_context_df,
                 "x_timestamp": pd.Series(context_df.index),
                 "y_timestamp": pd.Series(future_df.index),
@@ -327,7 +334,8 @@ def _run_inference(
             records.append({
                 "instrument": item["instrument"],
                 "context_end_date": item["context_end_date"],
-                "target_end_date": item["target_end_date"],
+                "prediction_start_date": item["prediction_start_date"],
+                "prediction_end_date": item["prediction_end_date"],
                 "last_close": item["last_close"],
                 "pred_close": pred_close,
                 "true_close": item["true_close"],
@@ -350,12 +358,12 @@ def _safe_corr(frame, method):
 
 def _build_daily_metrics(predictions):
     rows = []
-    for date, grp in predictions.groupby("context_end_date", sort=True):
+    for date, grp in predictions.groupby("prediction_start_date", sort=True):
         rows.append({
-            "context_end_date": date, "n_symbols": len(grp),
+            "prediction_start_date": date, "n_symbols": len(grp),
             "ic": _safe_corr(grp, "pearson"), "rank_ic": _safe_corr(grp, "spearman"),
         })
-    return pd.DataFrame(rows).sort_values("context_end_date")
+    return pd.DataFrame(rows).sort_values("prediction_start_date")
 
 
 def _compute_summary(predictions, daily_df):
@@ -384,10 +392,10 @@ def _compute_summary(predictions, daily_df):
 
 def _save_plot(daily_df, save_dir, split):
     fig, ax = plt.subplots(figsize=(12, 4.5))
-    daily_df.plot(x="context_end_date", y=["ic", "rank_ic"], ax=ax, grid=True,
+    daily_df.plot(x="prediction_start_date", y=["ic", "rank_ic"], ax=ax, grid=True,
                   title=f"{split.upper()} daily IC / RankIC")
     ax.set_ylabel("Correlation")
-    ax.set_xlabel("Context End Date")
+    ax.set_xlabel("Prediction Start Date")
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, f"{split}_metrics.png"), dpi=200)
     plt.close(fig)
@@ -485,8 +493,33 @@ def main():
     run_dir = os.path.join(args.result_save_path, args.result_name)
     os.makedirs(run_dir, exist_ok=True)
 
-    with open(os.path.join(run_dir, "run_config.json"), "w") as f:
-        json.dump(vars(args), f, indent=2)
+    with open(os.path.join(run_dir, "run_config.json"), "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "device": device,
+                "requested_device": args.device,
+                "tokenizer_path": args.tokenizer_path,
+                "model_path": args.model_path,
+                "data_path": args.data_path,
+                "pred_len": args.pred_len,
+                "hourly_window": args.hourly_window,
+                "sample_count": args.sample_count,
+                "batch_size": args.batch_size,
+                "splits": args.splits,
+                "protocol": {
+                    "split_anchor": "prediction_start_date",
+                    "non_trading_boundary_policy": (
+                        "use the first trading day on or after the configured "
+                        "range start as prediction_start_date"
+                    ),
+                    "allow_prediction_end_spillover": True,
+                    "split_ranges": metadata.get("splits", {}),
+                },
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
 
     tokenizer, model = _load_c_model(
         device, args.tokenizer_path, args.model_path,

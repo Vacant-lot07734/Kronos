@@ -46,7 +46,7 @@ class QlibDataset(Dataset):
 
         self.window = self.config.lookback_window + self.config.predict_window + 1
         self.metadata = self._load_metadata()
-        self.score_start, self.score_end = self._resolve_score_range()
+        self.prediction_start, self.prediction_end = self._resolve_prediction_range()
 
         self.symbols = list(self.data.keys())
         self.feature_list = self.config.feature_list
@@ -72,7 +72,7 @@ class QlibDataset(Dataset):
 
                 # Add all valid starting indices for this symbol to the global list.
                 for i in range(num_samples):
-                    if self._sample_in_score_range(df, i):
+                    if self._sample_in_prediction_range(df, i):
                         self.indices.append((symbol, i))
 
         # The effective dataset size is the minimum of the configured iterations
@@ -88,24 +88,24 @@ class QlibDataset(Dataset):
         except FileNotFoundError:
             return {}
 
-    def _resolve_score_range(self):
+    def _resolve_prediction_range(self):
         split_meta = self.metadata.get('splits', {}).get(self.data_type, {})
-        score_start = split_meta.get('score_start')
-        score_end = split_meta.get('score_end')
-        if not score_start or not score_end:
+        prediction_start = split_meta.get('prediction_start', split_meta.get('score_start'))
+        prediction_end = split_meta.get('prediction_end', split_meta.get('score_end'))
+        if not prediction_start or not prediction_end:
             return None, None
-        return pd.Timestamp(score_start), pd.Timestamp(score_end)
+        return pd.Timestamp(prediction_start), pd.Timestamp(prediction_end)
 
-    def _sample_in_score_range(self, df, start_idx: int) -> bool:
-        if self.score_start is None or self.score_end is None:
+    def _sample_in_prediction_range(self, df, start_idx: int) -> bool:
+        if self.prediction_start is None or self.prediction_end is None:
             return True
 
-        target_end_idx = start_idx + self.config.lookback_window + self.config.predict_window - 1
-        if target_end_idx >= len(df):
+        prediction_start_idx = start_idx + self.config.lookback_window
+        if prediction_start_idx >= len(df):
             return False
 
-        target_end_time = df.iloc[target_end_idx]['datetime']
-        return self.score_start <= target_end_time <= self.score_end
+        prediction_start_time = df.iloc[prediction_start_idx]['datetime']
+        return self.prediction_start <= prediction_start_time <= self.prediction_end
 
     def set_epoch_seed(self, epoch: int):
         """

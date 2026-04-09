@@ -42,42 +42,45 @@ def _load_symbol_df(csv_path: str, feature_list: list[str]) -> tuple[str, pd.Dat
     return symbol, df
 
 
-def _slice_with_lookback_buffer(df: pd.DataFrame, score_start: pd.Timestamp, score_end: pd.Timestamp, lookback_window: int):
+def _slice_with_prediction_buffer(
+    df: pd.DataFrame,
+    prediction_start: pd.Timestamp,
+    prediction_end: pd.Timestamp,
+    lookback_window: int,
+    predict_window: int,
+):
     if df.empty:
         return df
 
-    split_df = df.loc[df.index <= score_end].copy()
-    if split_df.empty:
-        return split_df
+    start_pos = df.index.searchsorted(prediction_start, side="left")
+    if start_pos >= len(df):
+        return df.iloc[0:0].copy()
 
-    pos = split_df.index.searchsorted(score_start)
-    buffered_pos = max(0, pos - lookback_window)
-    return split_df.iloc[buffered_pos:]
+    end_pos = df.index.searchsorted(prediction_end, side="right") - 1
+    if end_pos < start_pos:
+        return df.iloc[0:0].copy()
+
+    buffered_start_pos = max(0, start_pos - lookback_window)
+    buffered_end_pos = min(len(df) - 1, end_pos + predict_window - 1)
+    return df.iloc[buffered_start_pos:buffered_end_pos + 1].copy()
 
 
-def _count_trainable_windows(df: pd.DataFrame, lookback_window: int, predict_window: int, score_start: pd.Timestamp, score_end: pd.Timestamp) -> int:
+def _count_prediction_windows(
+    df: pd.DataFrame,
+    lookback_window: int,
+    predict_window: int,
+    prediction_start: pd.Timestamp,
+    prediction_end: pd.Timestamp,
+) -> int:
     window = lookback_window + predict_window + 1
     if len(df) < window:
         return 0
 
     count = 0
     for start_idx in range(len(df) - window + 1):
-        target_end_idx = start_idx + lookback_window + predict_window - 1
-        target_end_time = df.index[target_end_idx]
-        if score_start <= target_end_time <= score_end:
-            count += 1
-    return count
-
-
-def _count_eval_windows(df: pd.DataFrame, lookback_window: int, predict_window: int, score_start: pd.Timestamp, score_end: pd.Timestamp) -> int:
-    min_target_end_idx = lookback_window + predict_window - 1
-    if len(df) <= min_target_end_idx:
-        return 0
-
-    count = 0
-    for target_end_idx in range(min_target_end_idx, len(df)):
-        target_end_time = df.index[target_end_idx]
-        if score_start <= target_end_time <= score_end:
+        prediction_start_idx = start_idx + lookback_window
+        prediction_start_time = df.index[prediction_start_idx]
+        if prediction_start <= prediction_start_time <= prediction_end:
             count += 1
     return count
 
@@ -106,13 +109,31 @@ def main():
     for csv_path in tqdm(csv_paths, desc="Loading CSV data"):
         symbol, full_df = _load_symbol_df(csv_path, config.feature_list)
 
-        train_df = full_df.loc[(full_df.index >= train_start) & (full_df.index <= train_end)].copy()
-        val_df = _slice_with_lookback_buffer(full_df, val_start, val_end, config.lookback_window)
-        test_df = _slice_with_lookback_buffer(full_df, test_start, test_end, config.lookback_window)
+        train_df = _slice_with_prediction_buffer(
+            full_df,
+            train_start,
+            train_end,
+            config.lookback_window,
+            config.predict_window,
+        )
+        val_df = _slice_with_prediction_buffer(
+            full_df,
+            val_start,
+            val_end,
+            config.lookback_window,
+            config.predict_window,
+        )
+        test_df = _slice_with_prediction_buffer(
+            full_df,
+            test_start,
+            test_end,
+            config.lookback_window,
+            config.predict_window,
+        )
 
-        n_train_windows = _count_trainable_windows(train_df, config.lookback_window, config.predict_window, train_start, train_end)
-        n_val_windows = _count_trainable_windows(val_df, config.lookback_window, config.predict_window, val_start, val_end)
-        n_test_windows = _count_eval_windows(test_df, config.lookback_window, config.predict_window, test_start, test_end)
+        n_train_windows = _count_prediction_windows(train_df, config.lookback_window, config.predict_window, train_start, train_end)
+        n_val_windows = _count_prediction_windows(val_df, config.lookback_window, config.predict_window, val_start, val_end)
+        n_test_windows = _count_prediction_windows(test_df, config.lookback_window, config.predict_window, test_start, test_end)
 
         symbol_stats.append({
             "symbol": symbol,
@@ -163,18 +184,18 @@ def main():
         "symbols": kept_symbols,
         "splits": {
             "train": {
-                "score_start": train_start.strftime("%Y-%m-%d"),
-                "score_end": train_end.strftime("%Y-%m-%d"),
+                "prediction_start": train_start.strftime("%Y-%m-%d"),
+                "prediction_end": train_end.strftime("%Y-%m-%d"),
                 "rows_total": int(sum(len(df) for df in train_data.values())),
             },
             "val": {
-                "score_start": val_start.strftime("%Y-%m-%d"),
-                "score_end": val_end.strftime("%Y-%m-%d"),
+                "prediction_start": val_start.strftime("%Y-%m-%d"),
+                "prediction_end": val_end.strftime("%Y-%m-%d"),
                 "rows_total": int(sum(len(df) for df in val_data.values())),
             },
             "test": {
-                "score_start": test_start.strftime("%Y-%m-%d"),
-                "score_end": test_end.strftime("%Y-%m-%d"),
+                "prediction_start": test_start.strftime("%Y-%m-%d"),
+                "prediction_end": test_end.strftime("%Y-%m-%d"),
                 "rows_total": int(sum(len(df) for df in test_data.values())),
             },
         },

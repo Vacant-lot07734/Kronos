@@ -59,7 +59,7 @@ class DailyHourlyDataset(Dataset):
 
         self.daily_window = self.config.lookback_window + self.config.predict_window + 1
         self.metadata = self._load_metadata()
-        self.score_start, self.score_end = self._resolve_score_range()
+        self.prediction_start, self.prediction_end = self._resolve_prediction_range()
 
         self.symbols = list(self.data.keys())
         self.feature_list = self.config.feature_list
@@ -96,7 +96,7 @@ class DailyHourlyDataset(Dataset):
             entry["hourly"] = hourly_df[["datetime"] + self.feature_list + self.time_feature_list]
 
             for i in range(n_possible):
-                if not self._sample_in_score_range(daily_df, i):
+                if not self._sample_in_prediction_range(daily_df, i):
                     continue
                 # Check hourly availability for this sample
                 context_end_date = daily_df.iloc[i + self.config.lookback_window - 1]["datetime"]
@@ -115,21 +115,22 @@ class DailyHourlyDataset(Dataset):
         except FileNotFoundError:
             return {}
 
-    def _resolve_score_range(self):
+    def _resolve_prediction_range(self):
         split_meta = self.metadata.get("splits", {}).get(self.data_type, {})
-        s, e = split_meta.get("score_start"), split_meta.get("score_end")
+        s = split_meta.get("prediction_start", split_meta.get("score_start"))
+        e = split_meta.get("prediction_end", split_meta.get("score_end"))
         if not s or not e:
             return None, None
         return pd.Timestamp(s), pd.Timestamp(e)
 
-    def _sample_in_score_range(self, df, start_idx: int) -> bool:
-        if self.score_start is None or self.score_end is None:
+    def _sample_in_prediction_range(self, df, start_idx: int) -> bool:
+        if self.prediction_start is None or self.prediction_end is None:
             return True
-        target_end_idx = start_idx + self.config.lookback_window + self.config.predict_window - 1
-        if target_end_idx >= len(df):
+        prediction_start_idx = start_idx + self.config.lookback_window
+        if prediction_start_idx >= len(df):
             return False
-        t = df.iloc[target_end_idx]["datetime"]
-        return self.score_start <= t <= self.score_end
+        t = df.iloc[prediction_start_idx]["datetime"]
+        return self.prediction_start <= t <= self.prediction_end
 
     def set_epoch_seed(self, epoch: int):
         self.py_rng.seed(self.config.seed + epoch)

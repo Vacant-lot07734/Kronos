@@ -53,29 +53,35 @@ def _load_split_data(data_path: str, split: str) -> dict:
         return pickle.load(f)
 
 
+def _resolve_prediction_range(split_meta: dict) -> tuple[pd.Timestamp, pd.Timestamp]:
+    prediction_start = split_meta.get("prediction_start", split_meta.get("score_start"))
+    prediction_end = split_meta.get("prediction_end", split_meta.get("score_end"))
+    if prediction_start is None or prediction_end is None:
+        raise KeyError("Split metadata must define prediction_start/prediction_end.")
+    return pd.Timestamp(prediction_start), pd.Timestamp(prediction_end)
+
+
 def _build_eval_windows(split_data: dict, split_meta: dict, lookback_window: int, pred_len: int) -> list[dict]:
-    score_start = pd.Timestamp(split_meta["score_start"])
-    score_end = pd.Timestamp(split_meta["score_end"])
+    prediction_start, prediction_end = _resolve_prediction_range(split_meta)
 
     windows = []
     for symbol, df in split_data.items():
         df = df.sort_index()
-        min_target_end_idx = lookback_window + pred_len - 1
-        if len(df) <= min_target_end_idx:
+        if len(df) < lookback_window + pred_len:
             continue
 
-        for target_end_idx in range(min_target_end_idx, len(df)):
-            target_end_dt = df.index[target_end_idx]
-            if target_end_dt < score_start or target_end_dt > score_end:
+        for prediction_start_idx in range(lookback_window, len(df) - pred_len + 1):
+            prediction_start_dt = df.index[prediction_start_idx]
+            if prediction_start_dt < prediction_start or prediction_start_dt > prediction_end:
                 continue
 
-            context_end_idx = target_end_idx - pred_len
-            context_start_idx = context_end_idx - lookback_window + 1
+            context_end_idx = prediction_start_idx - 1
+            context_start_idx = prediction_start_idx - lookback_window
             if context_start_idx < 0:
                 continue
 
             context_df = df.iloc[context_start_idx:context_end_idx + 1]
-            future_df = df.iloc[context_end_idx + 1:target_end_idx + 1]
+            future_df = df.iloc[prediction_start_idx:prediction_start_idx + pred_len]
             if len(context_df) != lookback_window or len(future_df) != pred_len:
                 continue
 
@@ -87,7 +93,8 @@ def _build_eval_windows(split_data: dict, split_meta: dict, lookback_window: int
             windows.append({
                 "instrument": symbol,
                 "context_end_date": context_df.index[-1].strftime("%Y-%m-%d"),
-                "target_end_date": future_df.index[-1].strftime("%Y-%m-%d"),
+                "prediction_start_date": future_df.index[0].strftime("%Y-%m-%d"),
+                "prediction_end_date": future_df.index[-1].strftime("%Y-%m-%d"),
                 "context_df": model_context_df,
                 "x_timestamp": pd.Series(context_df.index),
                 "y_timestamp": pd.Series(future_df.index),
@@ -136,7 +143,8 @@ def _run_inference(
             records.append({
                 "instrument": item["instrument"],
                 "context_end_date": item["context_end_date"],
-                "target_end_date": item["target_end_date"],
+                "prediction_start_date": item["prediction_start_date"],
+                "prediction_end_date": item["prediction_end_date"],
                 "last_close": item["last_close"],
                 "pred_close": pred_close,
                 "true_close": item["true_close"],
@@ -157,15 +165,15 @@ def _safe_corr(frame: pd.DataFrame, method: str) -> float:
 
 def _build_daily_metrics(predictions: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    for trade_date, group in predictions.groupby("context_end_date", sort=True):
+    for trade_date, group in predictions.groupby("prediction_start_date", sort=True):
         rows.append({
-            "context_end_date": trade_date,
+            "prediction_start_date": trade_date,
             "n_symbols": int(len(group)),
             "ic": _safe_corr(group, method="pearson"),
             "rank_ic": _safe_corr(group, method="spearman"),
         })
 
-    return pd.DataFrame(rows).sort_values("context_end_date")
+    return pd.DataFrame(rows).sort_values("prediction_start_date")
 
 
 def _compute_summary(predictions: pd.DataFrame, daily_df: pd.DataFrame) -> dict:
@@ -204,14 +212,14 @@ def _save_plot(daily_df: pd.DataFrame, save_dir: str, split: str):
     fig, ax = plt.subplots(figsize=(12, 4.5))
 
     daily_df.plot(
-        x="context_end_date",
+        x="prediction_start_date",
         y=["ic", "rank_ic"],
         ax=ax,
         grid=True,
         title=f"{split.upper()} daily IC / RankIC",
     )
     ax.set_ylabel("Correlation")
-    ax.set_xlabel("Context End Date")
+    ax.set_xlabel("Prediction Start Date")
 
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, f"{split}_metrics.png"), dpi=200)
@@ -272,6 +280,15 @@ def main():
             "sample_count": args.sample_count,
             "batch_size": args.batch_size,
             "splits": args.splits,
+            "protocol": {
+                "split_anchor": "prediction_start_date",
+                "non_trading_boundary_policy": (
+                    "use the first trading day on or after the configured range "
+                    "start as prediction_start_date"
+                ),
+                "allow_prediction_end_spillover": True,
+                "split_ranges": metadata.get("splits", {}),
+            },
         }, f, indent=2, ensure_ascii=False)
 
     predictor = _load_predictor(

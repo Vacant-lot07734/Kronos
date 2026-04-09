@@ -8,6 +8,10 @@ Shared metric contract:
 - Primary metrics: `rank_ic`, `ic`, `rank_icir`, `icir`
 - Supporting metrics: `da`, `mae`, `rmse`
 - Deferred strategy-validation metrics: `AER`, `IR`
+- Split anchor: `prediction_start_date`
+- If a configured range start is not a trading day, use the first trading day
+  inside the range as the first `prediction_start_date`
+- Spillover rule: keep windows whose `prediction_start_date` is in range, even if `prediction_end_date` exceeds the split end
 
 Shared references:
 

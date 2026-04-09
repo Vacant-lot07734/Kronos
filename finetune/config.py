@@ -73,11 +73,11 @@ class Config:
         # =================================================================
         # Dataset Splitting & Paths
         # =================================================================
-        # Note: The validation/test set starts earlier than the training/validation set ends
-        # to account for the `lookback_window`.
+        # These ranges are interpreted as prediction_start_date intervals.
+        # Preprocessing adds backward context and forward horizon buffer automatically.
         self.train_time_range = _get_env_range("KRONOS_TRAIN_TIME_RANGE", ["2011-01-01", "2022-12-31"])
-        self.val_time_range = _get_env_range("KRONOS_VAL_TIME_RANGE", ["2022-09-01", "2024-06-30"])
-        self.test_time_range = _get_env_range("KRONOS_TEST_TIME_RANGE", ["2024-04-01", "2025-06-05"])
+        self.val_time_range = _get_env_range("KRONOS_VAL_TIME_RANGE", ["2023-01-01", "2024-06-30"])
+        self.test_time_range = _get_env_range("KRONOS_TEST_TIME_RANGE", ["2024-07-01", "2025-06-05"])
         self.backtest_time_range = _get_env_range("KRONOS_BACKTEST_TIME_RANGE", ["2024-07-01", "2025-06-05"])
 
         # TODO: Directory to save the processed, pickled datasets.
