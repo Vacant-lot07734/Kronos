@@ -14,7 +14,7 @@
 
 * B/C 当前都保留两类 checkpoint：`best_model_by_loss` 与 `best_model_by_rankic`
 * `checkpoints/best_model` 继续保留，并与 `best_model_by_loss` 对齐，兼容旧路径
-* A/B/C 的最终对比仍以 `RankIC / IC / long-short` 为主
+* A/B/C 的最终对比统一以 `rank_ic / ic / rank_icir / icir / da / mae / rmse` 为主
 * C 组保持独立的数据入口和评估入口，不与 B 组预处理脚本合并
 
 ## 2. 环境
@@ -213,7 +213,7 @@ bash zlab/scripts/run_group_c_sweep.sh
 * `val loss` 用于在线保存 `best_model_by_loss`
 * 同时保存每个 epoch 的 checkpoint 到 `checkpoints/epochs/`
 * 训练结束后，再统一在验证集上扫描这些 epoch checkpoint
-* 验证集 `mean_rank_ic` 最优的那个 epoch 会被复制为 `best_model_by_rankic`
+* 验证集 `rank_ic` 最优的那个 epoch 会被复制为 `best_model_by_rankic`
 * 默认会在选完 `best_model_by_rankic` 后删除 `checkpoints/epochs/`，只保留最终两份 best checkpoint；如需保留全部 epoch 模型，设 `KRONOS_CLEANUP_EPOCH_CHECKPOINTS=false`
 * 测试集只在训练完成后推理两次：一次 `cross-entropy`，一次 `rankIc`
 
@@ -271,17 +271,17 @@ bash zlab/scripts/run_group_c_sweep.sh
 
 优先顺序建议：
 
-1. `mean_rank_ic`
-2. `mean_ic`
-3. `rank_ic_ir`
-4. `long_short_top10_mean_return`
-5. `top10_mean_return`
+1. `rank_ic`
+2. `ic`
+3. `rank_icir`
+4. `icir`
+5. `da / mae / rmse`
 
 解释：
 
-* `mean_rank_ic` 是主排序指标
-* `mean_ic` 与 `rank_ic_ir` 用来补充线性相关性和稳定性
-* `long_short` 与 `top-k` 用来判断排序信号是否能转化成收益
+* `rank_ic` 是主排序指标
+* `ic`、`rank_icir` 与 `icir` 用来补充线性相关性和稳定性
+* `da / mae / rmse` 用来补充方向与误差表现
 
 ### 结果对比时的约束
 
@@ -298,7 +298,7 @@ bash zlab/scripts/run_group_c_sweep.sh
 
 当前 B/C 的更准确表述是：
 
-* “在统一训练目标下，同时比较 `loss` 选模路径与 `RankIC` 选模路径的下游金融指标差异”
+* “在统一训练目标下，同时比较 `loss` 选模路径与 `rank_ic` 选模路径的下游金融指标差异”
 
 而不是：
 
@@ -337,7 +337,7 @@ bash zlab/scripts/run_group_c_sweep.sh
 
 现象：
 
-* 同一模型重复评估，`RankIC` 或 `top-k` 有小幅波动
+* 同一模型重复评估，`rank_ic` 或 `ic` 有小幅波动
 
 原因：
 
@@ -375,20 +375,26 @@ python zlab/scripts/compare_eval_metrics.py 5 \
 * `metrics_summary_selected.csv`
 * `all_rank_ic1.png`
 * `all_ic1.png`
-* `all_ic_ir1.png`
+* `all_rank_icir1.png`
+* `all_icir1.png`
+* `all_da1.png`
 * `all_mae1.png`
+* `all_rmse1.png`
 * `selected_rank_ic1.png`
 * `selected_ic1.png`
-* `selected_ic_ir1.png`
+* `selected_rank_icir1.png`
+* `selected_icir1.png`
+* `selected_da1.png`
 * `selected_mae1.png`
+* `selected_rmse1.png`
 
 其中：
 
 * `all_*.png` 包含当前筛选条件下的全部实验
 * `selected_*.png` 只保留 `group_a` 与“优秀的 B/C 实验”
-* “优秀的 B/C 实验”定义为：某个 B/C 结果在任一指标下进入前三名，就会参与全部四个指标的子图比较
+* “优秀的 B/C 实验”定义为：某个 B/C 结果在任一指标下进入前二名，就会参与全部指标的子图比较
 * 所有图都使用同一固定顺序，便于直接对照不同指标
-* 图中的 `ic` 直接对应原始 `metrics.json` 里的 `mean_ic` 字段
+* 图中的 `ic` 直接对应原始 `metrics.json` 里的 `ic` 字段
 
 如果只想比较测试集：
 

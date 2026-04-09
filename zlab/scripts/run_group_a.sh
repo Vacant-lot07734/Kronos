@@ -12,7 +12,6 @@ fi
 PYTHON_BIN="${PYTHON_BIN:-${ZLAB_KRONOS_PYTHON:-$HOME/miniconda3/envs/kronos/bin/python}}"
 DEVICE="${DEVICE:-${ZLAB_KRONOS_DEVICE:-auto}}"
 SAMPLE_COUNT="${KRONOS_INFERENCE_SAMPLE_COUNT:-${ZLAB_KRONOS_SAMPLE_COUNT:-10}}"
-TOPK="${KRONOS_EVAL_TOPK:-${ZLAB_TOPK:-10}}"
 export KRONOS_PREDICT_WINDOW="$HORIZON"
 export KRONOS_DATASET_PATH="${KRONOS_DATASET_PATH_BASE:-$ROOT/zlab/results/processed_datasets}/h${HORIZON}"
 RESULT_SAVE_PATH="${KRONOS_EVAL_RESULT_PATH_BASE:-$ROOT/zlab/results/evaluations}/h${HORIZON}"
@@ -40,6 +39,5 @@ mkdir -p "$RUN_DIR"
     --pred-len "$HORIZON" \
     --sample-count "$SAMPLE_COUNT" \
     --batch-size "${KRONOS_EVAL_BATCH_SIZE:-${ZLAB_KRONOS_EVAL_BATCH_SIZE:-128}}" \
-    --topk "$TOPK" \
     --splits test
 } 2>&1 | tee "$LOG_PATH"

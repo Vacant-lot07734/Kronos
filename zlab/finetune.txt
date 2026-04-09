@@ -43,7 +43,7 @@
 
 * `csv_data_preprocess.py`：从 `zlab/data/daily/*.csv` 生成 `train/val/test_data.pkl`
 * `train_predictor.py`：冻结 tokenizer，部分解冻 predictor，做日线微调
-* `evaluate_ab.py`：输出 `RankIC / IC / DA / MAE / RMSE / top-k / long-short`
+* `evaluate_ab.py`：输出统一收益率指标 `rank_ic / ic / rank_icir / icir / da / mae / rmse`
 
 ### C
 
@@ -94,14 +94,13 @@ A/B 环境默认还开启：
 
 旧版测试更接近 demo 风格回测。当前 A/B/C 的主评估指标是：
 
-* `mean_rank_ic`
-* `mean_ic`
-* `rank_ic_ir`
-* `direction_accuracy`
+* `rank_ic`
+* `ic`
+* `rank_icir`
+* `icir`
+* `da`
 * `mae`
 * `rmse`
-* `topk_mean_return`
-* `long_short_topk_mean_return`
 
 也就是说，当前测试口径更接近“未来收益排序能力评估”，不是单纯生成 signal 后直接回测。
 
@@ -119,17 +118,17 @@ A/B 环境默认还开启：
   * `checkpoints/best_model_by_rankic`
 * `checkpoints/best_model` 保留为 `best_model_by_loss` 的兼容别名
 * 默认在 `best_model_by_rankic` 选完后自动删除 `checkpoints/epochs/`；若要保留全部 epoch 模型，设置 `KRONOS_CLEANUP_EPOCH_CHECKPOINTS=false`
-* 最终对比指标：`RankIC / IC / DA / MAE / RMSE / top-k / long-short`
+* 最终对比指标：`rank_ic / ic / rank_icir / icir / da / mae / rmse`
 
 其中：
 
 * `best_model_by_loss` 由训练期在线按 `val loss` 维护
-* `best_model_by_rankic` 由训练结束后统一扫描 epoch checkpoint，在验证集上按 `mean_rank_ic` 选择
+* `best_model_by_rankic` 由训练结束后统一扫描 epoch checkpoint，在验证集上按 `rank_ic` 选择
 * 测试集只在训练完成后推理两次，分别对应 `cross-entropy/` 与 `rankIc/` 两条路径
 
 因此当前实验结论应解释为：
 
-* “在统一训练目标下，同时观察 loss 选模路径与 RankIC 选模路径的下游金融指标差异”
+* “在统一训练目标下，同时观察 loss 选模路径与 `rank_ic` 选模路径的下游金融指标差异”
 
 而不是：
 

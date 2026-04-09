@@ -44,7 +44,6 @@ def parse_args():
     parser.add_argument("--sample-count", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=64,
                         help="Inference batch size (may need to be smaller than AB due to hourly context).")
-    parser.add_argument("--topk", type=int, default=10)
     parser.add_argument("--splits", nargs="+", default=["val", "test"], choices=["val", "test"])
     return parser.parse_args()
 
@@ -349,26 +348,17 @@ def _safe_corr(frame, method):
     return float(frame["pred_return"].corr(frame["true_return"], method=method))
 
 
-def _build_daily_metrics(predictions, topk):
+def _build_daily_metrics(predictions):
     rows = []
     for date, grp in predictions.groupby("context_end_date", sort=True):
-        k = min(topk, len(grp))
-        ranked = grp.sort_values("pred_return", ascending=False)
-        tk = float(ranked.head(k)["true_return"].mean())
-        bk = float(ranked.tail(k)["true_return"].mean())
         rows.append({
             "context_end_date": date, "n_symbols": len(grp),
             "ic": _safe_corr(grp, "pearson"), "rank_ic": _safe_corr(grp, "spearman"),
-            "topk_return": tk, "bottomk_return": bk, "long_short_return": tk - bk,
         })
-    df = pd.DataFrame(rows).sort_values("context_end_date")
-    df["cum_topk_return"] = (1 + df["topk_return"].fillna(0)).cumprod() - 1
-    df["cum_bottomk_return"] = (1 + df["bottomk_return"].fillna(0)).cumprod() - 1
-    df["cum_long_short_return"] = (1 + df["long_short_return"].fillna(0)).cumprod() - 1
-    return df
+    return pd.DataFrame(rows).sort_values("context_end_date")
 
 
-def _compute_summary(predictions, daily_df, topk):
+def _compute_summary(predictions, daily_df):
     ic_s = daily_df["ic"].dropna()
     ric_s = daily_df["rank_ic"].dropna()
 
@@ -381,30 +371,23 @@ def _compute_summary(predictions, daily_df, topk):
         "n_predictions": int(len(predictions)),
         "n_eval_dates": int(len(daily_df)),
         "n_instruments_mean": float(daily_df["n_symbols"].mean()) if not daily_df.empty else 0,
-        "mean_ic": float(ic_s.mean()) if not ic_s.empty else None,
-        "mean_rank_ic": float(ric_s.mean()) if not ric_s.empty else None,
-        "ic_ir": _ir(ic_s), "rank_ic_ir": _ir(ric_s),
-        "direction_accuracy": float((np.sign(predictions["pred_return"]) == np.sign(predictions["true_return"])).mean()),
+        "ic": float(ic_s.mean()) if not ic_s.empty else None,
+        "rank_ic": float(ric_s.mean()) if not ric_s.empty else None,
+        "icir": _ir(ic_s), "rank_icir": _ir(ric_s),
+        "da": float((np.sign(predictions["pred_return"]) == np.sign(predictions["true_return"])).mean()),
         "mae": float(np.mean(np.abs(predictions["pred_return"] - predictions["true_return"]))),
         "rmse": float(np.sqrt(np.mean((predictions["pred_return"] - predictions["true_return"]) ** 2))),
         "pred_return_mean": float(predictions["pred_return"].mean()),
         "true_return_mean": float(predictions["true_return"].mean()),
-        f"top{topk}_mean_return": float(daily_df["topk_return"].mean()) if not daily_df.empty else None,
-        f"bottom{topk}_mean_return": float(daily_df["bottomk_return"].mean()) if not daily_df.empty else None,
-        f"long_short_top{topk}_mean_return": float(daily_df["long_short_return"].mean()) if not daily_df.empty else None,
-        f"top{topk}_cum_return": float(daily_df["cum_topk_return"].iloc[-1]) if not daily_df.empty else None,
-        f"long_short_top{topk}_cum_return": float(daily_df["cum_long_short_return"].iloc[-1]) if not daily_df.empty else None,
     }
 
 
 def _save_plot(daily_df, save_dir, split):
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-    daily_df.plot(x="context_end_date", y=["cum_topk_return", "cum_bottomk_return", "cum_long_short_return"],
-                  ax=axes[0], grid=True, title=f"{split.upper()} cumulative return proxies")
-    axes[0].set_ylabel("Cumulative Return")
-    daily_df.plot(x="context_end_date", y=["ic", "rank_ic"], ax=axes[1], grid=True,
+    fig, ax = plt.subplots(figsize=(12, 4.5))
+    daily_df.plot(x="context_end_date", y=["ic", "rank_ic"], ax=ax, grid=True,
                   title=f"{split.upper()} daily IC / RankIC")
-    axes[1].set_ylabel("Correlation")
+    ax.set_ylabel("Correlation")
+    ax.set_xlabel("Context End Date")
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, f"{split}_metrics.png"), dpi=200)
     plt.close(fig)
@@ -478,10 +461,10 @@ def evaluate_split(tokenizer, model, split, split_data, split_meta, args, config
     )
     predictions.to_csv(os.path.join(split_dir, "predictions.csv"), index=False)
 
-    daily_df = _build_daily_metrics(predictions, args.topk)
+    daily_df = _build_daily_metrics(predictions)
     daily_df.to_csv(os.path.join(split_dir, "daily_metrics.csv"), index=False)
 
-    summary = _compute_summary(predictions, daily_df, args.topk)
+    summary = _compute_summary(predictions, daily_df)
     with open(os.path.join(split_dir, "metrics.json"), "w") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 

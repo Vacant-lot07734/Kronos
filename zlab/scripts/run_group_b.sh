@@ -24,7 +24,6 @@ EPOCHS="${KRONOS_EPOCHS:-10}"
 PRED_LR="${KRONOS_PREDICTOR_LR:-5e-5}"
 TRAIN_LAST_RATIO="${KRONOS_PREDICTOR_TRAIN_LAST_RATIO:-0.333333}"
 SAMPLE_COUNT="${KRONOS_INFERENCE_SAMPLE_COUNT:-10}"
-TOPK="${KRONOS_EVAL_TOPK:-10}"
 
 LR_TAG="$(sanitize_num "$PRED_LR")"
 validate_eval_only_flag "$EVAL_ONLY"
@@ -97,7 +96,6 @@ if [[ -d "$LOSS_MODEL_PATH" ]]; then
     --pred-len "$HORIZON" \
     --sample-count "$SAMPLE_COUNT" \
     --batch-size "${KRONOS_EVAL_BATCH_SIZE:-128}" \
-    --topk "$TOPK" \
     --splits test
 else
   echo "Skip val-loss checkpoint evaluation: $LOSS_MODEL_PATH not found" | tee -a "$INFER_LOG_PATH"
@@ -114,7 +112,6 @@ if [[ -d "$RANKIC_MODEL_PATH" ]]; then
     --pred-len "$HORIZON" \
     --sample-count "$SAMPLE_COUNT" \
     --batch-size "${KRONOS_EVAL_BATCH_SIZE:-128}" \
-    --topk "$TOPK" \
     --splits test
 else
   echo "Skip val-rankic checkpoint evaluation: $RANKIC_MODEL_PATH not found" | tee -a "$INFER_LOG_PATH"

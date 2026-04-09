@@ -90,10 +90,13 @@ Main experiment settings:
 
 Current key metrics:
 
-- `mean_rank_ic`
-- `mean_ic`
-- `rank_ic_ir`
+- `rank_ic`
+- `ic`
+- `rank_icir`
+- `icir`
+- `da`
 - `mae`
+- `rmse`
 
 Training and evaluation are separated:
 

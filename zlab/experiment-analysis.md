@@ -1,5 +1,7 @@
 # 当前实验结果分析
 
+注：本文记录的是统一评测协议收敛前的历史结果，因此表内仍保留当时的字段名，如 `mean_rank_ic`、`rank_ic_ir`、`direction_accuracy`、`top10_mean_return`。当前默认协议已统一为 `rank_ic / ic / rank_icir / icir / da / mae / rmse`。
+
 本文保留当前 A/B 实验的分析逻辑，不引入新的实验结论。当前 C 组尚未形成正式结果。
 
 ## 1. 当前已完成实验

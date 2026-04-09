@@ -11,20 +11,26 @@ import pandas as pd
 from matplotlib.patches import Patch
 
 
-DEFAULT_METRICS = ["mean_rank_ic", "mean_ic", "rank_ic_ir", "mae"]
+DEFAULT_METRICS = ["rank_ic", "ic", "rank_icir", "icir", "da", "mae", "rmse"]
 METRIC_COLUMN_MAP = {
-    "mean_rank_ic": "mean_rank_ic",
-    "mean_ic": "mean_ic",
-    "rank_ic_ir": "rank_ic_ir",
+    "rank_ic": "rank_ic",
+    "ic": "ic",
+    "rank_icir": "rank_icir",
+    "icir": "icir",
+    "da": "da",
     "mae": "mae",
+    "rmse": "rmse",
 }
 METRIC_TITLES = {
-    "mean_rank_ic": "rank_ic",
-    "mean_ic": "ic",
-    "rank_ic_ir": "ic_ir",
+    "rank_ic": "rank_ic",
+    "ic": "ic",
+    "rank_icir": "rank_icir",
+    "icir": "icir",
+    "da": "da",
     "mae": "mae",
+    "rmse": "rmse",
 }
-LOWER_IS_BETTER = {"mae"}
+LOWER_IS_BETTER = {"mae", "rmse"}
 SELECTION_ORDER = {"default": 0, "cross-entropy": 1, "rankIc": 2}
 SPLIT_ORDER = {"val": 0, "test": 1}
 GROUP_ORDER = {"group_a": 0, "group_b": 1, "group_c": 2}
@@ -63,7 +69,7 @@ def parse_args():
         "--metrics",
         nargs="+",
         default=DEFAULT_METRICS,
-        help="Metrics to compare. Default: mean_rank_ic mean_ic rank_ic_ir mae",
+        help="Metrics to compare. Default: rank_ic ic rank_icir icir da mae rmse",
     )
     parser.add_argument(
         "--splits",

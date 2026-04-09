@@ -172,8 +172,8 @@ def evaluate_val_rankic(model: Kronos, tokenizer: KronosTokenizer, device, confi
         top_k=config.get('inference_top_k', 0),
         top_p=config.get('inference_top_p', 0.9),
     )
-    daily_df = build_daily_metrics(predictions, topk=config.get('eval_topk', 10))
-    return compute_eval_summary(predictions, daily_df, topk=config.get('eval_topk', 10))
+    daily_df = build_daily_metrics(predictions)
+    return compute_eval_summary(predictions, daily_df)
 
 
 def _metric_is_valid(value) -> bool:
@@ -242,14 +242,14 @@ def select_rankic_checkpoint(
         epoch_dir = os.path.join(epoch_root, epoch_name)
         candidate = Kronos.from_pretrained(epoch_dir).eval()
         summary = evaluate_val_rankic(candidate, tokenizer, device, config, eval_context)
-        rank_ic = summary.get("mean_rank_ic")
+        rank_ic = summary.get("rank_ic")
         epoch_num = int(epoch_name.split("_")[-1])
         selection_records.append({
             "epoch": epoch_num,
             "checkpoint": epoch_dir,
-            "mean_rank_ic": rank_ic,
-            "mean_ic": summary.get("mean_ic"),
-            "rank_ic_ir": summary.get("rank_ic_ir"),
+            "rank_ic": rank_ic,
+            "ic": summary.get("ic"),
+            "rank_icir": summary.get("rank_icir"),
         })
         if _metric_is_valid(rank_ic) and rank_ic > best_rank_ic:
             best_rank_ic = float(rank_ic)

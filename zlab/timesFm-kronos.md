@@ -1,7 +1,19 @@
-# TimesFM vs Kronos Stage1
+# TimesFM vs Kronos Zero-Shot
 
 Cross-repo zero-shot comparison is now owned by the shared workspace
 `/home/yzh/workspace/zlab` layer.
+
+Shared metric contract:
+
+- Primary metrics: `rank_ic`, `ic`, `rank_icir`, `icir`
+- Supporting metrics: `da`, `mae`, `rmse`
+- Deferred strategy-validation metrics: `AER`, `IR`
+
+Shared references:
+
+- `/home/yzh/workspace/zlab/protocol/zero_shot.md`
+- `/home/yzh/workspace/zlab/protocol/evaluation_metrics.md`
+- `/home/yzh/workspace/zlab/protocol/evaluation_metrics.json`
 
 ## Canonical entrypoints
 

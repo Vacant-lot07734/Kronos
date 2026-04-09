@@ -157,26 +157,25 @@ B/C 的主训练目标保持一致：
 
 主指标用于回答横截面排序是否有效：
 
-* `mean_rank_ic`
-* `mean_ic`
-* `rank_ic_ir`
+* `rank_ic`
+* `ic`
+* `rank_icir`
+* `icir`
 
 ### 辅指标
 
 用于补充方向和幅度合理性：
 
-* `direction_accuracy`
+* `da`
 * `mae`
 * `rmse`
 
-### 收益代理指标
+### 策略验证指标
 
-用于验证排序能力是否能转成选股收益：
+如果后续进入策略验证，再单独增加：
 
-* `topk_mean_return`
-* `topk_cum_return`
-* `long_short_topk_mean_return`
-* `long_short_topk_cum_return`
+* `AER`
+* `IR`
 
 ### 统一比较约束
 
@@ -193,25 +192,25 @@ B/C 的主训练目标保持一致：
 训练阶段先看两层信息：
 
 * 优化是否正常：`train loss`、`val loss`
-* 下游是否有意义：`val RankIC / IC / long-short`
+* 下游是否有意义：`val rank_ic / ic / icir`
 
 一般判断：
 
 * `train loss` 下降、`val loss` 也下降：优化正常
 * `train loss` 继续下降，但 `val loss` 恶化：开始过拟合
-* `val loss` 改善，但 `RankIC` 不改善：训练目标与最终目标出现错位
+* `val loss` 改善，但 `rank_ic` 不改善：训练目标与最终目标出现错位
 
 ## 结果解释原则
 
 正式结论建议遵循下面顺序：
 
-1. 先看 `mean_rank_ic`
-2. 再看 `mean_ic / rank_ic_ir`
-3. 最后结合 `top-k / long-short` 判断收益可转化性
+1. 先看 `rank_ic`
+2. 再看 `ic / rank_icir / icir`
+3. 最后结合 `da / mae / rmse`
 
 只有当一个模型同时满足：
 
 * 排序指标不差
-* 收益代理指标不差
+* 误差和方向指标也不差
 
 才应认为整体更优。

@@ -24,7 +24,6 @@ def parse_args():
     parser.add_argument("--pred-len", type=int, help="Override predict window during evaluation.")
     parser.add_argument("--sample-count", type=int, default=10, help="Sampling count averaged inside Kronos predictor.")
     parser.add_argument("--batch-size", type=int, default=128, help="Inference batch size in window units.")
-    parser.add_argument("--topk", type=int, default=10, help="Top-k size for return proxy statistics.")
     parser.add_argument("--splits", nargs="+", default=["val", "test"], choices=["val", "test"], help="Dataset splits to evaluate.")
     return parser.parse_args()
 
@@ -156,37 +155,24 @@ def _safe_corr(frame: pd.DataFrame, method: str) -> float:
     return float(frame["pred_return"].corr(frame["true_return"], method=method))
 
 
-def _build_daily_metrics(predictions: pd.DataFrame, topk: int) -> pd.DataFrame:
+def _build_daily_metrics(predictions: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for trade_date, group in predictions.groupby("context_end_date", sort=True):
-        k = min(topk, len(group))
-        ranked = group.sort_values("pred_return", ascending=False)
-
-        topk_return = float(ranked.head(k)["true_return"].mean())
-        bottomk_return = float(ranked.tail(k)["true_return"].mean())
-
         rows.append({
             "context_end_date": trade_date,
             "n_symbols": int(len(group)),
             "ic": _safe_corr(group, method="pearson"),
             "rank_ic": _safe_corr(group, method="spearman"),
-            "topk_return": topk_return,
-            "bottomk_return": bottomk_return,
-            "long_short_return": topk_return - bottomk_return,
         })
 
-    daily_df = pd.DataFrame(rows).sort_values("context_end_date")
-    daily_df["cum_topk_return"] = (1.0 + daily_df["topk_return"].fillna(0.0)).cumprod() - 1.0
-    daily_df["cum_bottomk_return"] = (1.0 + daily_df["bottomk_return"].fillna(0.0)).cumprod() - 1.0
-    daily_df["cum_long_short_return"] = (1.0 + daily_df["long_short_return"].fillna(0.0)).cumprod() - 1.0
-    return daily_df
+    return pd.DataFrame(rows).sort_values("context_end_date")
 
 
-def _compute_summary(predictions: pd.DataFrame, daily_df: pd.DataFrame, topk: int) -> dict:
+def _compute_summary(predictions: pd.DataFrame, daily_df: pd.DataFrame) -> dict:
     ic_series = daily_df["ic"].dropna()
     rank_ic_series = daily_df["rank_ic"].dropna()
 
-    direction_accuracy = float((np.sign(predictions["pred_return"]) == np.sign(predictions["true_return"])).mean())
+    da = float((np.sign(predictions["pred_return"]) == np.sign(predictions["true_return"])).mean())
     mae = float(np.mean(np.abs(predictions["pred_return"] - predictions["true_return"])))
     rmse = float(np.sqrt(np.mean((predictions["pred_return"] - predictions["true_return"]) ** 2)))
 
@@ -202,44 +188,30 @@ def _compute_summary(predictions: pd.DataFrame, daily_df: pd.DataFrame, topk: in
         "n_predictions": int(len(predictions)),
         "n_eval_dates": int(len(daily_df)),
         "n_instruments_mean": float(daily_df["n_symbols"].mean()) if not daily_df.empty else 0.0,
-        "mean_ic": float(ic_series.mean()) if not ic_series.empty else None,
-        "mean_rank_ic": float(rank_ic_series.mean()) if not rank_ic_series.empty else None,
-        "ic_ir": _ir(ic_series),
-        "rank_ic_ir": _ir(rank_ic_series),
-        "direction_accuracy": direction_accuracy,
+        "ic": float(ic_series.mean()) if not ic_series.empty else None,
+        "rank_ic": float(rank_ic_series.mean()) if not rank_ic_series.empty else None,
+        "icir": _ir(ic_series),
+        "rank_icir": _ir(rank_ic_series),
+        "da": da,
         "mae": mae,
         "rmse": rmse,
         "pred_return_mean": float(predictions["pred_return"].mean()),
         "true_return_mean": float(predictions["true_return"].mean()),
-        f"top{topk}_mean_return": float(daily_df["topk_return"].mean()) if not daily_df.empty else None,
-        f"bottom{topk}_mean_return": float(daily_df["bottomk_return"].mean()) if not daily_df.empty else None,
-        f"long_short_top{topk}_mean_return": float(daily_df["long_short_return"].mean()) if not daily_df.empty else None,
-        f"top{topk}_cum_return": float(daily_df["cum_topk_return"].iloc[-1]) if not daily_df.empty else None,
-        f"long_short_top{topk}_cum_return": float(daily_df["cum_long_short_return"].iloc[-1]) if not daily_df.empty else None,
     }
 
 
 def _save_plot(daily_df: pd.DataFrame, save_dir: str, split: str):
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-
-    daily_df.plot(
-        x="context_end_date",
-        y=["cum_topk_return", "cum_bottomk_return", "cum_long_short_return"],
-        ax=axes[0],
-        grid=True,
-        title=f"{split.upper()} cumulative return proxies",
-    )
-    axes[0].set_ylabel("Cumulative Return")
+    fig, ax = plt.subplots(figsize=(12, 4.5))
 
     daily_df.plot(
         x="context_end_date",
         y=["ic", "rank_ic"],
-        ax=axes[1],
+        ax=ax,
         grid=True,
         title=f"{split.upper()} daily IC / RankIC",
     )
-    axes[1].set_ylabel("Correlation")
-    axes[1].set_xlabel("Context End Date")
+    ax.set_ylabel("Correlation")
+    ax.set_xlabel("Context End Date")
 
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, f"{split}_metrics.png"), dpi=200)
@@ -266,10 +238,10 @@ def evaluate_split(predictor: KronosPredictor, split: str, split_data: dict, spl
     )
     predictions.to_csv(os.path.join(split_dir, "predictions.csv"), index=False)
 
-    daily_df = _build_daily_metrics(predictions, topk=args.topk)
+    daily_df = _build_daily_metrics(predictions)
     daily_df.to_csv(os.path.join(split_dir, "daily_metrics.csv"), index=False)
 
-    summary = _compute_summary(predictions, daily_df, topk=args.topk)
+    summary = _compute_summary(predictions, daily_df)
     with open(os.path.join(split_dir, "metrics.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
@@ -299,7 +271,6 @@ def main():
             "pred_len": args.pred_len,
             "sample_count": args.sample_count,
             "batch_size": args.batch_size,
-            "topk": args.topk,
             "splits": args.splits,
         }, f, indent=2, ensure_ascii=False)
 
