@@ -1,6 +1,8 @@
 # Auto-generated local experiment config for A/B/C runs.
 # Reset experiment-scoped overrides on each `source` to avoid stale shell
 # state when previous override lines are later commented out.
+export ZLAB_WORKSPACE_ROOT="${ZLAB_WORKSPACE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/zlab}"
+
 unset KRONOS_PREDICTOR_LR
 unset KRONOS_BATCH_SIZE
 unset KRONOS_EPOCHS

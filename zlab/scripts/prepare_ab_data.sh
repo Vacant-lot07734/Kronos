@@ -9,8 +9,8 @@ if [[ -f "$ROOT/zlab/ab_env.sh" ]]; then
   source "$ROOT/zlab/ab_env.sh"
 fi
 
-PYTHON_BIN="${PYTHON_BIN:-$HOME/miniconda3/envs/kronos/bin/python}"
-export KRONOS_LOCAL_CSV_DIR="${KRONOS_LOCAL_CSV_DIR:-$ROOT/zlab/data/daily}"
+PYTHON_BIN="${PYTHON_BIN:-${ZLAB_KRONOS_PYTHON:-$HOME/miniconda3/envs/kronos/bin/python}}"
+export KRONOS_LOCAL_CSV_DIR="${KRONOS_LOCAL_CSV_DIR:-${ZLAB_DATA_ROOT:-$ROOT/zlab/data/daily}}"
 export KRONOS_LOOKBACK_WINDOW="${KRONOS_LOOKBACK_WINDOW:-20}"
 export KRONOS_PREDICT_WINDOW="$HORIZON"
 export KRONOS_DATASET_BEGIN_TIME="${KRONOS_DATASET_BEGIN_TIME:-2025-06-01}"
