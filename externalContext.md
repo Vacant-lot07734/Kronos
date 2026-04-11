@@ -83,10 +83,15 @@ Machine assumption:
 
 Main experiment settings:
 
-- train / val / test split over `2025-06-01` to `2026-02-28`
+- train / val / test split over `2021-01-01` to `2025-12-31`
+- shared default split:
+  train `2021-01-01 ~ 2024-06-30`,
+  val `2024-07-01 ~ 2024-12-31`,
+  test `2025-01-01 ~ 2025-12-31`
 - shared daily context window `L_d = 20`
 - hourly context window `L_h = 25`
 - prediction horizon `H ∈ {1, 5}`
+- canonical sample-rule reference: `/home/yzh/workspace/zlab/protocol/sample_selection.md`
 
 Current key metrics:
 

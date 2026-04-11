@@ -141,8 +141,12 @@ def _count_prediction_windows(df, lookback_window, predict_window, prediction_st
     count = 0
     for start_idx in range(len(df) - window + 1):
         prediction_start_idx = start_idx + lookback_window
+        prediction_end_idx = prediction_start_idx + predict_window - 1
+        if prediction_end_idx >= len(df):
+            continue
         prediction_start_time = df.index[prediction_start_idx]
-        if prediction_start <= prediction_start_time <= prediction_end:
+        prediction_end_time = df.index[prediction_end_idx]
+        if prediction_start <= prediction_start_time and prediction_end_time <= prediction_end:
             count += 1
     return count
 
@@ -273,6 +277,12 @@ def main():
         "lookback_window": config.lookback_window,
         "predict_window": config.predict_window,
         "hourly_window": hourly_window,
+        "split_assignment_rule": "strict_full_horizon_within_split",
+        "non_trading_boundary_policy": (
+            "use the first trading day on or after the configured range start "
+            "as prediction_start_date, and require prediction_end_date to stay "
+            "on or before the configured range end"
+        ),
         "feature_list": feature_list,
         "n_daily_files": len(daily_csvs),
         "n_hourly_files": len(hourly_csvs),

@@ -8,16 +8,26 @@ Shared metric contract:
 - Primary metrics: `rank_ic`, `ic`, `rank_icir`, `icir`
 - Supporting metrics: `da`, `mae`, `rmse`
 - Deferred strategy-validation metrics: `AER`, `IR`
-- Split anchor: `prediction_start_date`
 - If a configured range start is not a trading day, use the first trading day
   inside the range as the first `prediction_start_date`
-- Spillover rule: keep windows whose `prediction_start_date` is in range, even if `prediction_end_date` exceeds the split end
+- Strict split rule: keep windows only when `prediction_start_date` is in range
+  and `prediction_end_date` stays on or before the split end
+- Train: `2021-01-01 ~ 2024-06-30`
+- Val: `2024-07-01 ~ 2024-12-31`
+- Test: `2025-01-01 ~ 2025-12-31`
 
 Shared references:
 
 - `/home/yzh/workspace/zlab/protocol/zero_shot.md`
 - `/home/yzh/workspace/zlab/protocol/evaluation_metrics.md`
 - `/home/yzh/workspace/zlab/protocol/evaluation_metrics.json`
+- `/home/yzh/workspace/zlab/protocol/sample_selection.md`
+
+Current status:
+
+- TimesFM and Kronos now follow the shared strict full-horizon split rule
+- the remaining adapter-specific caveats are documented in
+  `/home/yzh/workspace/zlab/protocol/sample_selection.md`
 
 ## Canonical entrypoints
 

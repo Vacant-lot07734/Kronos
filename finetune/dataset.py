@@ -101,11 +101,16 @@ class QlibDataset(Dataset):
             return True
 
         prediction_start_idx = start_idx + self.config.lookback_window
-        if prediction_start_idx >= len(df):
+        prediction_end_idx = prediction_start_idx + self.config.predict_window - 1
+        if prediction_start_idx >= len(df) or prediction_end_idx >= len(df):
             return False
 
         prediction_start_time = df.iloc[prediction_start_idx]['datetime']
-        return self.prediction_start <= prediction_start_time <= self.prediction_end
+        prediction_end_time = df.iloc[prediction_end_idx]['datetime']
+        return (
+            self.prediction_start <= prediction_start_time
+            and prediction_end_time <= self.prediction_end
+        )
 
     def set_epoch_seed(self, epoch: int):
         """

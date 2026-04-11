@@ -56,8 +56,8 @@ class Config:
         self.instrument = _get_env_str("KRONOS_INSTRUMENT", "csi300")
 
         # Overall time range for data loading from Qlib.
-        self.dataset_begin_time = _get_env_str("KRONOS_DATASET_BEGIN_TIME", "2011-01-01")
-        self.dataset_end_time = _get_env_str("KRONOS_DATASET_END_TIME", "2025-06-05")
+        self.dataset_begin_time = _get_env_str("KRONOS_DATASET_BEGIN_TIME", "2021-01-01")
+        self.dataset_end_time = _get_env_str("KRONOS_DATASET_END_TIME", "2025-12-31")
         self.local_csv_dir = _expand_path(_get_env_str("KRONOS_LOCAL_CSV_DIR", "./zlab/data/daily"))
 
         # Sliding window parameters for creating samples.
@@ -73,12 +73,14 @@ class Config:
         # =================================================================
         # Dataset Splitting & Paths
         # =================================================================
-        # These ranges are interpreted as prediction_start_date intervals.
-        # Preprocessing adds backward context and forward horizon buffer automatically.
-        self.train_time_range = _get_env_range("KRONOS_TRAIN_TIME_RANGE", ["2011-01-01", "2022-12-31"])
-        self.val_time_range = _get_env_range("KRONOS_VAL_TIME_RANGE", ["2023-01-01", "2024-06-30"])
-        self.test_time_range = _get_env_range("KRONOS_TEST_TIME_RANGE", ["2024-07-01", "2025-06-05"])
-        self.backtest_time_range = _get_env_range("KRONOS_BACKTEST_TIME_RANGE", ["2024-07-01", "2025-06-05"])
+        # These ranges use the strict full-horizon rule:
+        # prediction_start_date must fall on or after the split start and
+        # prediction_end_date must stay on or before the split end.
+        # Preprocessing still adds backward context automatically.
+        self.train_time_range = _get_env_range("KRONOS_TRAIN_TIME_RANGE", ["2021-01-01", "2024-06-30"])
+        self.val_time_range = _get_env_range("KRONOS_VAL_TIME_RANGE", ["2024-07-01", "2024-12-31"])
+        self.test_time_range = _get_env_range("KRONOS_TEST_TIME_RANGE", ["2025-01-01", "2025-12-31"])
+        self.backtest_time_range = _get_env_range("KRONOS_BACKTEST_TIME_RANGE", ["2025-01-01", "2025-12-31"])
 
         # TODO: Directory to save the processed, pickled datasets.
         self.dataset_path = _expand_path(_get_env_str("KRONOS_DATASET_PATH", "./data/processed_datasets"))

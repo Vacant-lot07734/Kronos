@@ -72,7 +72,11 @@ def _build_eval_windows(split_data: dict, split_meta: dict, lookback_window: int
 
         for prediction_start_idx in range(lookback_window, len(df) - pred_len + 1):
             prediction_start_dt = df.index[prediction_start_idx]
-            if prediction_start_dt < prediction_start or prediction_start_dt > prediction_end:
+            prediction_end_idx = prediction_start_idx + pred_len - 1
+            if prediction_end_idx >= len(df):
+                continue
+            prediction_end_dt = df.index[prediction_end_idx]
+            if prediction_start_dt < prediction_start or prediction_end_dt > prediction_end:
                 continue
 
             context_end_idx = prediction_start_idx - 1
@@ -281,12 +285,12 @@ def main():
             "batch_size": args.batch_size,
             "splits": args.splits,
             "protocol": {
-                "split_anchor": "prediction_start_date",
+                "split_assignment_rule": "strict_full_horizon_within_split",
                 "non_trading_boundary_policy": (
                     "use the first trading day on or after the configured range "
-                    "start as prediction_start_date"
+                    "start as prediction_start_date, and require "
+                    "prediction_end_date to stay inside the configured range end"
                 ),
-                "allow_prediction_end_spillover": True,
                 "split_ranges": metadata.get("splits", {}),
             },
         }, f, indent=2, ensure_ascii=False)

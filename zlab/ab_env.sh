@@ -33,11 +33,11 @@ export KRONOS_PRETRAINED_PREDICTOR_PATH="NeoQuasar/Kronos-base"
 # -------------------------------------------------------------------
 # A/B experiment split
 # -------------------------------------------------------------------
-export KRONOS_DATASET_BEGIN_TIME="2025-06-01"
-export KRONOS_DATASET_END_TIME="2026-02-28"
-export KRONOS_TRAIN_TIME_RANGE="2025-06-01,2025-11-30"
-export KRONOS_VAL_TIME_RANGE="2025-12-01,2025-12-31"
-export KRONOS_TEST_TIME_RANGE="2026-01-01,2026-02-28"
+export KRONOS_DATASET_BEGIN_TIME="2021-01-01"
+export KRONOS_DATASET_END_TIME="2025-12-31"
+export KRONOS_TRAIN_TIME_RANGE="2021-01-01,2024-06-30"
+export KRONOS_VAL_TIME_RANGE="2024-07-01,2024-12-31"
+export KRONOS_TEST_TIME_RANGE="2025-01-01,2025-12-31"
 export KRONOS_LOOKBACK_WINDOW="20"
 
 # HORIZON is set by each wrapper script: `1` or `5`.
