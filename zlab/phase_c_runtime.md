@@ -9,6 +9,7 @@ Use the shared Python CLI from `workspace/zlab`:
 - `python -m zlab.cli.prepare_data`
 - `python -m zlab.cli.run_kronos_zero_shot`
 - `python -m zlab.cli.run_kronos_finetune`
+- `python -m zlab.cli.run_kronos_hourly_zero_shot`
 - `python -m zlab.cli.run_backtest`
 
 Repo-local shell entrypoints have been removed on purpose. The supported path is
@@ -74,3 +75,17 @@ The canonical protocol lives in:
 
 - `/home/yzh/workspace/zlab/protocol/backtest_topk.md`
 - `/home/yzh/workspace/zlab/protocol/evaluation_pipeline.md`
+
+## Basket filtering
+
+Both daily and hourly Kronos backtests accept:
+
+- `--inference-basket-path /path/to/basket.csv`
+- `--basket-path /path/to/basket.csv`
+
+The basket file is a single-column CSV named `instrument`.
+
+- `--inference-basket-path` restricts prediction and forecast-quality metrics to
+  the selected instruments
+- `--basket-path` keeps full-universe prediction but filters only the
+  downstream backtest layer
