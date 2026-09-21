@@ -32,7 +32,7 @@ window = lookback_window + predict_window + 1
 
 $$\hat{x} = \text{clip}\left(\frac{x - \mu}{\sigma + 10^{-5}}, -5, 5\right)$$
 
-配置项 `normalize_with_context_only` 控制是用整个窗口还是仅用 lookback 部分计算 $\mu, \sigma$。
+配置项 `normalize_with_context_only` 控制计算 $\mu, \sigma$ 的窗口范围，默认行为与兼容开关见[微调数据归一化](../zlab/normalization.md)。
 
 ### 2.3 输出
 

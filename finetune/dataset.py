@@ -13,8 +13,8 @@ class QlibDataset(Dataset):
     """
     A PyTorch Dataset for handling Qlib financial time series data.
 
-    This dataset pre-computes all possible start indices for sliding windows
-    and then randomly samples from them during training/validation.
+    This dataset pre-computes all possible start indices for sliding windows,
+    then samples randomly for training and by index for validation.
 
     Args:
         data_type (str): The type of dataset to load, either 'train' or 'val'.
@@ -128,23 +128,11 @@ class QlibDataset(Dataset):
         return self.n_samples
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return normalized features and time features for one window.
+
+        Training samples a random window. Validation uses ``idx`` so
+        DistributedSampler can partition windows across ranks.
         """
-        Retrieves a random sample from the dataset.
-
-        Note: The `idx` argument is ignored. Instead, a random index is drawn
-        from the pre-computed `self.indices` list using `self.py_rng`. This
-        ensures random sampling over the entire dataset for each call.
-
-        Args:
-            idx (int): Ignored.
-
-        Returns:
-            tuple[torch.Tensor, torch.Tensor]: A tuple containing:
-                - x_tensor (torch.Tensor): The normalized feature tensor.
-                - x_stamp_tensor (torch.Tensor): The time feature tensor.
-        """
-        # Keep training stochastic, but make validation index-driven so the
-        # DistributedSampler can deterministically shard samples across ranks.
         if self.data_type == 'train':
             sample_idx = self.py_rng.randint(0, len(self.indices) - 1)
         else:
@@ -160,8 +148,8 @@ class QlibDataset(Dataset):
         x = win_df[self.feature_list].values.astype(np.float32)
         x_stamp = win_df[self.time_feature_list].values.astype(np.float32)
 
-        # Match inference-time scaling for A/B experiments by using only the
-        # historical lookback slice to estimate normalization statistics.
+        # Estimate statistics from history by default; the full-window option
+        # is retained for reproducing earlier runs.
         if self.config.normalize_with_context_only:
             norm_source = x[:self.config.lookback_window]
         else:
